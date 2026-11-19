@@ -5,6 +5,7 @@
  *  - chrome  : IA intégrée de Chrome (Gemini Nano, Prompt API) si présente
  *  - scripted: pas d'IA, questions prédéfinies + correcteur par règles
  * ------------------------------------------------------------------ */
+import { beginLoad, endLoad } from './device';
 import { getState, type LlmProvider } from './store';
 import type { EngineStatus } from './tts';
 
@@ -88,6 +89,7 @@ class LlmService {
       return;
     }
     this.set({ status: 'loading', progress: 0, detail: 'Chargement du modèle…' });
+    beginLoad('webllm', model);
     try {
       if (this.engine) {
         await this.engine.unload?.();
@@ -108,8 +110,10 @@ class LlmService {
       } catch {
         /* sans gravité */
       }
+      endLoad('webllm');
       this.set({ status: 'ready', progress: 1, detail: `${model.split('-q4')[0]} prêt (local, WebGPU)` });
     } catch (err) {
+      endLoad('webllm');
       this.engine = null;
       this.set({ status: 'error', progress: 0, detail: String((err as Error)?.message ?? err) });
     }

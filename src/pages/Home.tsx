@@ -57,7 +57,7 @@ function Onboarding() {
       </div>
 
       <h2 className="section-title">Comment ça marche ?</h2>
-      <div className="grid-3">
+      <div className="cards-3">
         {[
           ['test', 'Test adaptatif', '20 questions qui s’ajustent à vos réponses pour estimer votre niveau CECRL (A1 → C2).'],
           ['grammar', 'Leçons courtes', 'Un objectif concret, la grammaire expliquée en français, du vocabulaire audio et des exercices variés.'],
@@ -150,7 +150,7 @@ export default function Home() {
           <div style={{ flex: 1 }}>
             <div className="tiny muted">Zone de jeu</div>
             <strong style={{ fontSize: '1.1rem' }}>Mini-jeux & badges</strong>
-            <div className="small muted">Chrono-Vocab, Faux amis, Prononciation…</div>
+            <div className="small muted">Chrono-Vocab, Verbes irréguliers, Memory…</div>
           </div>
         </button>
       </div>

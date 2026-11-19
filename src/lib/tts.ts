@@ -4,6 +4,7 @@
  *    phonèmes fournis => synchro labiale précise + enveloppe audio réelle.
  *  - Repli : speechSynthesis du système (instantané, sans téléchargement).
  * ------------------------------------------------------------------ */
+import { beginLoad, constrainedDevice, endLoad, interruptedLoads } from './device';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { getState } from './store';
 
@@ -171,18 +172,39 @@ class TtsService {
     }
   }
 
-  /** Lance (une seule fois) le téléchargement/chargement de Kokoro. */
+  /** Appareil à utiliser pour Kokoro selon le réglage, l'appareil et les plantages précédents. */
   async resolveDevice(): Promise<'wasm' | 'webgpu'> {
     const pref = getState().settings.kokoroDevice;
     if (pref === 'wasm' || pref === 'webgpu') return pref;
+    // Téléphone : la voix GPU (fp32, ≈ 320 Mo) ne tient pas en mémoire à côté du reste ; l'onglet
+    // plante et la page se recharge en boucle. Le processeur (8 bits, ≈ 90 Mo) est sûr.
+    if (constrainedDevice()) return 'wasm';
+    // Le dernier chargement GPU n'est jamais arrivé au bout (onglet planté ?) : processeur.
+    if (interruptedLoads('kokoro').device === 'webgpu') return 'wasm';
     return (await webgpuAvailable()) ? 'webgpu' : 'wasm';
   }
 
-  loadKokoro() {
+  /**
+   * Lance (une seule fois) le téléchargement/chargement de Kokoro. Les chargements automatiques
+   * s'arrêtent après deux interruptions (plantage probable) ; `manual` force un nouvel essai.
+   */
+  loadKokoro({ manual = false }: { manual?: boolean } = {}) {
     if (this.kokoro.status === 'loading' || this.kokoro.status === 'ready') return;
+    if (!manual && interruptedLoads('kokoro').count >= 2) {
+      this.kokoro = {
+        status: 'error',
+        progress: 0,
+        detail: 'le chargement de la voix a été interrompu plusieurs fois (mémoire insuffisante ?). Touchez « Télécharger » pour réessayer',
+      };
+      this.emit();
+      return;
+    }
     this.kokoro = { status: 'loading', progress: 0, detail: 'Téléchargement de la voix neuronale…' };
     this.emit();
-    void this.resolveDevice().then((device) => this.startWorker(device));
+    void this.resolveDevice().then((device) => {
+      beginLoad('kokoro', device);
+      this.startWorker(device);
+    });
   }
 
   private startWorker(device: 'wasm' | 'webgpu') {
@@ -191,6 +213,9 @@ class TtsService {
     this.worker = new Worker(new URL('../workers/tts.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
     this.worker.onerror = (e) => {
+      endLoad('kokoro');
+      this.worker?.terminate();
+      this.worker = null;
       this.kokoro = { status: 'error', progress: 0, detail: e.message || 'Erreur du worker' };
       this.emit();
     };
@@ -210,11 +235,16 @@ class TtsService {
         break;
       }
       case 'ready':
+        endLoad('kokoro');
         this.kokoroDevice = msg.device ?? null;
         this.kokoro = { status: 'ready', progress: 1, detail: msg.device === 'webgpu' ? 'Voix neuronale prête (GPU)' : 'Voix neuronale prête (processeur)' };
         this.emit();
         break;
       case 'error':
+        endLoad('kokoro');
+        // Worker neuf au prochain essai (celui-ci peut être dans un état incohérent).
+        this.worker?.terminate();
+        this.worker = null;
         this.kokoro = { status: 'error', progress: 0, detail: msg.error };
         this.emit();
         break;

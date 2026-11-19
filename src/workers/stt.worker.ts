@@ -17,7 +17,12 @@ async function create(model: string, device: 'wasm' | 'webgpu') {
   const make = pipeline as unknown as (task: string, model: string, opts: object) => Promise<unknown>;
   return (await make('automatic-speech-recognition', model, {
     device,
-    dtype: device === 'webgpu' ? { encoder_model: 'fp32', decoder_model_merged: 'q4' } : 'q8',
+    // L'encodeur quantifié en 8 bits dégrade nettement la reconnaissance des petits modèles (tiny, base),
+    // surtout avec un accent : on le garde en fp32 (≈ +50 Mo). Small reste en 8 bits (mémoire).
+    dtype:
+      device === 'webgpu'
+        ? { encoder_model: 'fp32', decoder_model_merged: 'q4' }
+        : { encoder_model: /small|medium|large/i.test(model) ? 'q8' : 'fp32', decoder_model_merged: 'q8' },
     progress_callback: (p: unknown) => ctx.postMessage({ type: 'progress', p }),
   })) as AutomaticSpeechRecognitionPipeline;
 }

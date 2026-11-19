@@ -66,7 +66,7 @@ export function Quests() {
   const d = today(s);
   const claimed = s.questsClaimed[dayKey()] ?? [];
   return (
-    <div className="card">
+    <div className="card quests-card">
       {questsOfDay().map((q) => {
         const v = Math.min(q.target, q.metric(d, s));
         const done = claimed.includes(q.id) || v >= q.target;

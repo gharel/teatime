@@ -74,6 +74,10 @@ export default function App() {
       if (theme === 'auto') root.removeAttribute('data-theme');
       else root.setAttribute('data-theme', theme);
       document.getElementById('meta-theme')?.setAttribute('content', resolvedTheme(theme) === 'dark' ? '#11161a' : '#FFF9F2');
+      // Mode sombre forcé (Brave, Chrome Android) : on déclare nos thèmes pour qu'il n'inverse rien.
+      document
+        .getElementById('meta-color-scheme')
+        ?.setAttribute('content', theme === 'light' ? 'only light' : theme === 'dark' ? 'dark' : 'light dark');
     };
     apply();
     const mq = window.matchMedia('(prefers-color-scheme: dark)');

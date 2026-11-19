@@ -16,6 +16,8 @@ import { wordDiff } from '../lib/corrector';
 import { pron } from '../lib/pron';
 import type { PronIssue, PronResult, WordAssessment } from '../lib/pronunciation';
 import { speechScore, splitSentences } from '../lib/text';
+import { interruptedLoads } from '../lib/device';
+import { semantic } from '../lib/semantic';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
 import Icon, { ICONS, IconBadge, topicIcon } from '../components/Icon';
@@ -38,6 +40,7 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
   const kokoro = useService(tts, () => ({ ...tts.kokoro }));
   const llmStatus = useService(llm, () => ({ ...llm.status }));
   const whisperStatus = useService(whisper, () => ({ ...whisper.status }));
+  const understanding = useService(semantic, () => ({ ...semantic.status }));
   const model = WEBLLM_MODELS.find((m) => m.id === settings.webllmModel);
   const sttLabel =
     settings.sttEngine === 'whisper' || !webSpeechSupported()
@@ -69,7 +72,7 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
           {kokoro.status === 'loading' && <Progress value={kokoro.progress} />}
         </div>
         {settings.ttsEngine === 'kokoro' && (kokoro.status === 'idle' || kokoro.status === 'error') && (
-          <button className="btn sm" onClick={() => tts.loadKokoro()}>
+          <button className="btn sm" onClick={() => tts.loadKokoro({ manual: true })}>
             Télécharger
           </button>
         )}
@@ -82,6 +85,19 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
         </div>
       </div>
       <PronEngineRow />
+      <div className="engine-row">
+        <span className={`status-dot ${understanding.status === 'idle' ? 'ready' : understanding.status}`} />
+        <div style={{ flex: 1 }}>
+          <strong className="small">Compréhension des réponses</strong>
+          <div className="tiny muted">
+            {understanding.status === 'idle'
+              ? 'Emma vérifie que vous répondez à sa question et suit vos changements de sujet · modèle local ≈ 23 Mo, chargé au début de la conversation'
+              : understanding.status === 'error'
+                ? `Indisponible (${understanding.detail}) : Emma enchaîne ses questions`
+                : understanding.detail}
+          </div>
+        </div>
+      </div>
       <div className="engine-row">
         <span className={`status-dot ${settings.llmProvider === 'scripted' ? 'ready' : llmStatus.status}`} />
         <div style={{ flex: 1 }}>
@@ -142,7 +158,15 @@ export default function Tutor() {
     void (async () => {
       // La voix neuronale est l'essentiel de l'expérience : on la prépare dès l'arrivée sur la page.
       if (settings.ttsEngine === 'kokoro' && tts.kokoro.status === 'idle') tts.loadKokoro();
-      if (settings.llmProvider === 'webllm' && llm.status.status === 'idle' && (await llm.isCached())) void llm.load();
+      // Un chargement du LLM déjà interrompu (onglet planté faute de mémoire ?) : pas de relance
+      // automatique, sinon la page replanterait à chaque visite. Le bouton « Charger » reste disponible.
+      if (
+        settings.llmProvider === 'webllm' &&
+        llm.status.status === 'idle' &&
+        interruptedLoads('webllm').count === 0 &&
+        (await llm.isCached())
+      )
+        void llm.load();
       if (settings.llmProvider === 'scripted') void llm.load();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -481,7 +505,9 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     open.spoken.forEach((s) => enqueueSpeech(s));
     const g = gen.current;
     // Mains libres : le micro s'ouvre dès le début (il est en pause tant qu'Emma parle).
-    if (getState().settings.pronAnalysis) pron.load();
+    if (getState().settings.pronAnalysis && interruptedLoads('pron').count === 0) pron.load();
+    // Compréhension des réponses (petit modèle local) : prête avant la première réponse.
+    session.warmUp();
     if (getState().settings.handsFree) setMic(true);
     void (async () => {
       await waitSpeech();
@@ -612,7 +638,7 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     );
   }
 
-  const q = session.questions[Math.max(0, session.qIndex - 1)];
+  const q = session.awaitingQuestion();
   const stateLabel =
     state === 'speaking'
       ? 'Emma parle…'

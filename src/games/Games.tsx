@@ -8,11 +8,13 @@ import { LEVELS } from '../types';
 import { UNITS_BY_LEVEL } from '../data/lessons';
 import { FALSE_FRIENDS } from '../data/falseFriends';
 import { MINIMAL_PAIRS, TONGUE_TWISTERS } from '../data/pronunciation';
+import { IRREGULAR_VERBS, formMatches, type IrregularVerb } from '../data/irregularVerbs';
+import { COMMON_MISTAKES, type CommonMistake } from '../data/commonMistakes';
 import { checkAnswer, normalize, pick, shuffle, speechScore } from '../lib/text';
 import { claimQuests, getState, reward, saveBest } from '../lib/store';
 import { say } from '../lib/tts';
 import { listen } from '../lib/stt';
-import { celebrate, navigate, notify, notifyBadges, sfx, useKey } from '../components/ui';
+import { celebrate, navigate, notify, notifyBadges, Rich, sfx, useKey } from '../components/ui';
 import Icon, { ICONS, IconBadge, gameIcon } from '../components/Icon';
 
 export const GAMES = [
@@ -21,6 +23,9 @@ export const GAMES = [
   { id: 'puzzle', title: 'Puzzle de phrases', desc: 'Remettez un maximum de phrases dans l’ordre en 90 secondes.' },
   { id: 'dictee', title: 'Dictée éclair', desc: 'Écoutez et écrivez 8 phrases. Précision et rapidité !' },
   { id: 'prononciation', title: 'Défi prononciation', desc: 'Ship ou sheep ? Think ou sink ? Entraînez votre oreille et votre bouche.' },
+  { id: 'verbes', title: 'Verbes irréguliers', desc: 'Go, went, gone ! 90 secondes pour écrire un maximum de prétérits et de participes.' },
+  { id: 'phrase-juste', title: 'Phrase juste ?', desc: '« I am agree » ? Repérez en 60 secondes les fautes typiques des francophones.' },
+  { id: 'memory', title: 'Memory des mots', desc: 'Retrouvez les paires anglais–français en retournant le moins de cartes possible.' },
 ] as const;
 
 export type GameId = (typeof GAMES)[number]['id'];
@@ -629,8 +634,437 @@ export function Prononciation() {
   );
 }
 
+/* ------------------------------ Verbes irréguliers ------------------------------ */
+
+/** Verbes indispensables jusqu'en A2, tous ensuite. */
+function verbPool(): IrregularVerb[] {
+  const lv = getState().profile.level ?? 'A2';
+  return LEVELS.indexOf(lv) <= 1 ? IRREGULAR_VERBS.filter((v) => v.band === 'A') : IRREGULAR_VERBS;
+}
+
+const firstForm = (forms: string) => forms.split('|')[0];
+
+export function VerbesIrreguliers() {
+  const [phase, setPhase] = useState<'start' | 'play' | 'end'>('start');
+  const [deck, setDeck] = useState<IrregularVerb[]>(() => shuffle(verbPool()));
+  const [i, setI] = useState(0);
+  const [past, setPast] = useState('');
+  const [part, setPart] = useState('');
+  const [score, setScore] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [shown, setShown] = useState<null | { past: boolean; part: boolean }>(null);
+  const pastRef = useRef<HTMLInputElement>(null);
+  const partRef = useRef<HTMLInputElement>(null);
+  const left = useCountdown(90, phase === 'play', () => setPhase('end'));
+  const v = deck[i % deck.length];
+  const iRef = useRef(i);
+  iRef.current = i;
+
+  const restart = () => {
+    setDeck(shuffle(verbPool()));
+    setI(0);
+    setScore(0);
+    setCombo(0);
+    setPast('');
+    setPart('');
+    setShown(null);
+    setPhase('play');
+  };
+
+  useEffect(() => {
+    if (phase === 'play' && !shown) pastRef.current?.focus();
+  }, [phase, i, shown]);
+
+  const next = () => {
+    setShown(null);
+    setPast('');
+    setPart('');
+    setI((x) => x + 1);
+  };
+
+  const submit = () => {
+    if (shown) return next();
+    if (!past.trim() || !part.trim()) {
+      (past.trim() ? partRef : pastRef).current?.focus();
+      return;
+    }
+    const okPast = formMatches(past, v.past);
+    const okPart = formMatches(part, v.participle);
+    const both = okPast && okPart;
+    const c = both ? combo + 1 : 0;
+    setCombo(c);
+    setScore((s) => s + (Number(okPast) + Number(okPart)) * (c >= 5 ? 2 : 1));
+    setShown({ past: okPast, part: okPart });
+    void say(`${v.base}, ${firstForm(v.past)}, ${firstForm(v.participle)}`);
+    if (both) {
+      sfx('ok');
+      // Sans faute : verbe suivant automatiquement (sauf si l'apprenant a déjà avancé).
+      const at = i;
+      window.setTimeout(() => iRef.current === at && next(), 700);
+    } else sfx('ko');
+  };
+
+  if (phase === 'start')
+    return (
+      <StartCard
+        icon="verbes"
+        title="Verbes irréguliers"
+        desc="90 secondes. Pour chaque verbe, écrivez le prétérit puis le participe passé (go → went → gone). 1 point par forme juste, points doublés à partir de 5 verbes parfaits d'affilée."
+        onStart={restart}
+      />
+    );
+  if (phase === 'end') return <GameOver game="verbes" score={score} unit="formes" xpFactor={1} onReplay={restart} />;
+
+  const status = (ok: boolean | undefined) => (shown ? (ok ? ' ok' : ' ko') : '');
+  return (
+    <div className="narrow">
+      <Hud left={left} score={score} combo={combo} label="formes" />
+      <div className="card center" style={{ padding: 24 }}>
+        <p className="muted small" style={{ margin: 0 }}>
+          {v.fr}
+        </p>
+        <p style={{ fontSize: '2.2rem', fontWeight: 900, margin: '4px 0 0' }}>
+          to {v.base}{' '}
+          <button className="round-btn" style={{ width: 34, height: 34, verticalAlign: 'middle' }} onClick={() => void say(v.base)} aria-label={`Écouter ${v.base}`}>
+            <Icon name="speaker" size={16} />
+          </button>
+        </p>
+      </div>
+      <form
+        className="card mt"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <div className="verb-forms">
+          <label className="field">
+            Prétérit
+            <input
+              ref={pastRef}
+              className={`input${status(shown?.past)}`}
+              value={past}
+              onChange={(e) => setPast(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !shown && !part.trim()) {
+                  e.preventDefault();
+                  partRef.current?.focus();
+                }
+              }}
+              readOnly={!!shown}
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="next"
+              placeholder="went"
+            />
+          </label>
+          <label className="field">
+            Participe passé
+            <input
+              ref={partRef}
+              className={`input${status(shown?.part)}`}
+              value={part}
+              onChange={(e) => setPart(e.target.value)}
+              readOnly={!!shown}
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="done"
+              placeholder="gone"
+            />
+          </label>
+        </div>
+        {shown && !(shown.past && shown.part) && (
+          <div className="feedback ko" style={{ position: 'static', margin: '14px 0 0', borderRadius: 14 }}>
+            <strong>
+              {v.base} → {v.past.replace('|', ' / ')} → {v.participle.replace('|', ' / ')}
+            </strong>
+          </div>
+        )}
+        <div className="row mt" style={{ justifyContent: 'flex-end' }}>
+          <button className="btn primary" type="submit">
+            {shown ? 'Suivant →' : 'Valider'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* ------------------------------ Phrase juste ? ------------------------------ */
+
+interface MistakeRound {
+  m: CommonMistake;
+  /** La phrase affichée est-elle la version fautive ? */
+  wrong: boolean;
+}
+
+function mistakeDeck(): MistakeRound[] {
+  return shuffle(COMMON_MISTAKES).map((m) => ({ m, wrong: Math.random() < 0.55 }));
+}
+
+export function PhraseJuste() {
+  const [phase, setPhase] = useState<'start' | 'play' | 'end'>('start');
+  const [deck, setDeck] = useState<MistakeRound[]>(() => mistakeDeck());
+  const [i, setI] = useState(0);
+  const [score, setScore] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [answer, setAnswer] = useState<null | { saidCorrect: boolean; ok: boolean }>(null);
+  const left = useCountdown(60, phase === 'play', () => setPhase('end'));
+  const r = deck[i % deck.length];
+  const iRef = useRef(i);
+  iRef.current = i;
+
+  const restart = () => {
+    setDeck(mistakeDeck());
+    setI(0);
+    setScore(0);
+    setCombo(0);
+    setAnswer(null);
+    setPhase('play');
+  };
+
+  const next = () => {
+    setAnswer(null);
+    setI((x) => x + 1);
+  };
+
+  const choose = (saidCorrect: boolean) => {
+    if (answer) return;
+    const ok = saidCorrect === !r.wrong;
+    setAnswer({ saidCorrect, ok });
+    if (ok) {
+      const c = combo + 1;
+      setCombo(c);
+      setScore((s) => s + (c >= 5 ? 2 : 1));
+      sfx('ok');
+      // Bonne réponse : on enchaîne (un peu plus tard si la correction est affichée).
+      const at = i;
+      window.setTimeout(() => iRef.current === at && next(), r.wrong ? 1300 : 450);
+    } else {
+      setCombo(0);
+      sfx('ko');
+    }
+  };
+
+  useKey(
+    (e) => {
+      if (phase !== 'play') return;
+      if (e.key === '1' || e.key === 'ArrowLeft') choose(true);
+      else if (e.key === '2' || e.key === 'ArrowRight') choose(false);
+      else if (e.key === 'Enter' && answer && !answer.ok) next();
+    },
+    [phase, answer, r, combo, i],
+  );
+
+  if (phase === 'start')
+    return (
+      <StartCard
+        icon="phrase-juste"
+        title="Phrase juste ?"
+        desc="60 secondes. Chaque phrase est-elle correcte ou fautive ? Les pièges viennent des fautes les plus fréquentes des francophones. Touches 1 et 2 (ou ← →) au clavier."
+        onStart={restart}
+      />
+    );
+  if (phase === 'end') return <GameOver game="phrase-juste" score={score} unit="points" xpFactor={2} onReplay={restart} />;
+
+  const shownText = r.wrong ? r.m.wrong : r.m.right;
+  return (
+    <div className="narrow">
+      <Hud left={left} score={score} combo={combo} />
+      <div className="card center" style={{ padding: 28 }}>
+        <p className="muted small">Cette phrase est-elle correcte ?</p>
+        <p style={{ fontSize: '1.6rem', fontWeight: 900, margin: 0 }}>{shownText}</p>
+      </div>
+      <div className="grid-2 mt">
+        {[true, false].map((c) => (
+          <button
+            key={String(c)}
+            className={'option' + (answer ? (c === !r.wrong ? ' correct' : c === answer.saidCorrect ? ' wrong' : '') : '')}
+            style={{ justifyContent: 'center', minHeight: 70 }}
+            onClick={() => choose(c)}
+          >
+            <span className="key">{c ? 1 : 2}</span>
+            <Icon name={c ? 'ok' : 'ko'} size={20} /> {c ? 'Correcte' : 'Fautive'}
+          </button>
+        ))}
+      </div>
+      {answer && (r.wrong || !answer.ok) && (
+        <div className={`feedback ${answer.ok ? 'ok' : 'ko'}`}>
+          <p style={{ margin: 0 }}>
+            {r.wrong ? (
+              <>
+                <del>{r.m.wrong}</del> → <strong>{r.m.right}</strong>
+              </>
+            ) : (
+              <>
+                <strong>{r.m.right}</strong> était correcte (la faute fréquente : <del>{r.m.wrong}</del>).
+              </>
+            )}
+          </p>
+          <p className="small" style={{ margin: '6px 0 0' }}>
+            <Rich text={r.m.tip} />
+          </p>
+          {!answer.ok && (
+            <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 0 }}>
+              <button className="btn primary" autoFocus onClick={next}>
+                Suivant →
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ Memory des mots ------------------------------ */
+
+interface MemoryCard {
+  key: number;
+  pair: number;
+  text: string;
+  lang: 'en' | 'fr';
+}
+
+function memoryDeck(pairs: number): MemoryCard[] {
+  const seen = new Set<string>();
+  const items = shuffle(vocabPool()).filter((v) => {
+    const k1 = v.en.toLowerCase();
+    const k2 = v.fr.toLowerCase();
+    if (v.en.length > 18 || v.fr.length > 20 || seen.has(k1) || seen.has(k2)) return false;
+    seen.add(k1);
+    seen.add(k2);
+    return true;
+  });
+  const chosen = items.slice(0, pairs);
+  return shuffle(
+    chosen.flatMap((v, p) => [
+      { key: p * 2, pair: p, text: v.en, lang: 'en' as const },
+      { key: p * 2 + 1, pair: p, text: v.fr, lang: 'fr' as const },
+    ]),
+  );
+}
+
+/** Score du Memory : 100 pour un sans-faute rapide, −4 par paire ratée, −1 toutes les 5 s. */
+export function memoryScore(pairs: number, moves: number, seconds: number): number {
+  return Math.max(10, 100 - 4 * Math.max(0, moves - pairs) - Math.floor(seconds / 5));
+}
+
+export function MemoryMots() {
+  const PAIRS = 8;
+  const [phase, setPhase] = useState<'start' | 'play' | 'end'>('start');
+  const [cards, setCards] = useState<MemoryCard[]>([]);
+  const [flipped, setFlipped] = useState<number[]>([]);
+  const [found, setFound] = useState<Set<number>>(new Set());
+  const [moves, setMoves] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [final, setFinal] = useState(0);
+  const startedAt = useRef(0);
+
+  const restart = () => {
+    setCards(memoryDeck(PAIRS));
+    setFlipped([]);
+    setFound(new Set());
+    setMoves(0);
+    setElapsed(0);
+    startedAt.current = performance.now();
+    setPhase('play');
+  };
+
+  useEffect(() => {
+    if (phase !== 'play') return;
+    const t = window.setInterval(() => setElapsed(Math.floor((performance.now() - startedAt.current) / 1000)), 500);
+    return () => window.clearInterval(t);
+  }, [phase]);
+
+  const flip = (k: number) => {
+    const c = cards[k];
+    if (!c || flipped.length >= 2 || flipped.includes(k) || found.has(c.pair)) return;
+    if (c.lang === 'en') void say(c.text);
+    const now = [...flipped, k];
+    setFlipped(now);
+    if (now.length < 2) return;
+    setMoves((m) => m + 1);
+    const [a, b] = now.map((x) => cards[x]);
+    if (a.pair === b.pair) {
+      sfx('ok');
+      const nextFound = new Set(found).add(a.pair);
+      setFound(nextFound);
+      window.setTimeout(() => setFlipped([]), 250);
+      if (nextFound.size === PAIRS) {
+        const secs = Math.floor((performance.now() - startedAt.current) / 1000);
+        setFinal(memoryScore(PAIRS, moves + 1, secs));
+        window.setTimeout(() => setPhase('end'), 600);
+      }
+    } else {
+      sfx('ko');
+      window.setTimeout(() => setFlipped([]), 950);
+    }
+  };
+
+  if (phase === 'start')
+    return (
+      <StartCard
+        icon="memory"
+        title="Memory des mots"
+        desc={`${PAIRS} paires anglais–français cachées sous ${PAIRS * 2} cartes. Retournez-en deux à la fois : chaque paire ratée et chaque seconde coûtent des points.`}
+        onStart={restart}
+      />
+    );
+  if (phase === 'end') return <GameOver game="memory" score={final} unit="points" xpFactor={0.3} onReplay={restart} />;
+
+  return (
+    <div className="narrow">
+      <div className="row between mb">
+        <span className="chip">
+          <Icon name="hourglass" size={16} /> {elapsed}s
+        </span>
+        <span className="chip">
+          {found.size}/{PAIRS} paires · {moves} coup{moves > 1 ? 's' : ''}
+        </span>
+      </div>
+      <div className="memory-grid" role="grid" aria-label="Cartes du Memory">
+        {cards.map((c, k) => {
+          const isFound = found.has(c.pair);
+          const visible = isFound || flipped.includes(k);
+          return (
+            <button
+              key={c.key}
+              className={`memory-card${visible ? ' up' : ''}${isFound ? ' found' : ''} ${c.lang}`}
+              onClick={() => flip(k)}
+              disabled={isFound}
+              aria-label={visible ? `${c.lang === 'en' ? 'Anglais' : 'Français'} : ${c.text}` : `Carte ${k + 1}, cachée`}
+            >
+              {visible ? (
+                <>
+                  <span className="lang">{c.lang === 'en' ? 'EN' : 'FR'}</span>
+                  <span className="txt">{c.text}</span>
+                </>
+              ) : (
+                <span className="back" aria-hidden>
+                  ?
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function GameRouter({ id }: { id: string }) {
   switch (id) {
+    case 'verbes':
+      return <VerbesIrreguliers />;
+    case 'phrase-juste':
+      return <PhraseJuste />;
+    case 'memory':
+      return <MemoryMots />;
     case 'chrono':
       return <ChronoVocab />;
     case 'faux-amis':

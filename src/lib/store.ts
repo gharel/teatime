@@ -4,6 +4,7 @@
  * ------------------------------------------------------------------ */
 import { useSyncExternalStore } from 'react';
 import type { Level, Skill } from '../types';
+import { constrainedDevice } from './device';
 import { hashString, seeded } from './text';
 
 export type TtsEngine = 'kokoro' | 'system';
@@ -111,7 +112,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ttsEngine: 'kokoro',
   kokoroVoice: 'af_heart',
   kokoroDevice: 'auto',
-  settingsRev: 2,
+  settingsRev: 3,
   systemVoice: '',
   speechRate: 1,
   sttEngine: 'webspeech',
@@ -123,7 +124,8 @@ export const DEFAULT_SETTINGS: Settings = {
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'llama3.2:3b',
   handsFree: true,
-  pronAnalysis: true,
+  // Modèle lourd (≈ 320 Mo, ~1 Go en mémoire) : désactivé par défaut sur téléphone, activable à la main.
+  pronAnalysis: !constrainedDevice(),
   subtitles: true,
   sfx: true,
   theme: 'auto',
@@ -159,9 +161,13 @@ function initialState(): AppState {
 }
 
 function migrateSettings(st: Settings): Settings {
+  let s = st;
   // v2 : la voix neuronale choisit automatiquement le GPU (bien plus fluide) quand il est disponible.
-  if ((st.settingsRev ?? 1) < 2) return { ...st, kokoroDevice: 'auto', settingsRev: 2 };
-  return st;
+  if ((s.settingsRev ?? 1) < 2) s = { ...s, kokoroDevice: 'auto', settingsRev: 2 };
+  // v3 : sur téléphone, l'analyse de prononciation (gros modèle) saturait la mémoire avec la voix et
+  // Whisper : l'onglet plantait et se rechargeait en boucle. Désactivée par défaut, activable à la main.
+  if (s.settingsRev < 3) s = { ...s, pronAnalysis: s.pronAnalysis && !constrainedDevice(), settingsRev: 3 };
+  return s;
 }
 
 function load(): AppState {

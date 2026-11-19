@@ -37,7 +37,9 @@ import {
   Gamepad2,
   Gem,
   GraduationCap,
+  Grid2x2,
   Hand,
+  History,
   Handshake,
   HardDrive,
   HeartPulse,
@@ -78,6 +80,7 @@ import {
   ShoppingCart,
   Signpost,
   SkipForward,
+  SpellCheck,
   SlidersHorizontal,
   Smartphone,
   Snail,
@@ -309,6 +312,9 @@ const GAME: Record<string, LucideIcon> = {
   puzzle: Puzzle,
   dictee: PenLine,
   prononciation: Mic,
+  verbes: History,
+  'phrase-juste': SpellCheck,
+  memory: Grid2x2,
 };
 export const gameIcon = (id: string): LucideIcon => GAME[id] ?? Gamepad2;
 

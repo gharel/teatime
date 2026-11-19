@@ -12,6 +12,7 @@
  *  - ContinuousListener     : micro ouvert en permanence (conversation avec
  *                             Emma), découpage automatique en énoncés.
  * ------------------------------------------------------------------ */
+import { beginLoad, constrainedDevice, endLoad, interruptedLoads } from './device';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -108,7 +109,34 @@ function micErrorMessage(err: unknown): string {
   return (err as Error)?.message || String(err);
 }
 
-/** Ré-échantillonnage linéaire vers 16 kHz (format attendu par Whisper). */
+/** Noyau passe-bas (sinc fenêtré de Blackman) tabulé, par rapport de ré-échantillonnage. */
+const KERNEL_RES = 64; // pas de la table : 1/64 d'échantillon
+const kernels = new Map<number, { half: number; table: Float32Array }>();
+function lowpassKernel(ratio: number) {
+  let k = kernels.get(ratio);
+  if (k) return k;
+  // Coupure un peu sous 8 kHz (Nyquist de la sortie), exprimée en cycles par échantillon d'entrée.
+  const fc = (0.5 / ratio) * 0.92;
+  const half = Math.ceil(8 * ratio); // 8 passages par zéro de chaque côté
+  const table = new Float32Array(half * KERNEL_RES + 2);
+  for (let j = 0; j < table.length; j++) {
+    const t = j / KERNEL_RES;
+    const u = Math.min(1, t / half);
+    const win = 0.42 + 0.5 * Math.cos(Math.PI * u) + 0.08 * Math.cos(2 * Math.PI * u);
+    const x = 2 * fc * t;
+    const sinc = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x);
+    table[j] = 2 * fc * sinc * win;
+  }
+  k = { half, table };
+  kernels.set(ratio, k);
+  return k;
+}
+
+/**
+ * Ré-échantillonnage vers 16 kHz (format attendu par Whisper), avec filtre anti-repliement.
+ * Une simple interpolation linéaire depuis 48 kHz replie les aigus (s, f, th…) dans la bande
+ * utile : la voix devient brouillée et Whisper se trompe bien plus souvent.
+ */
 export function resampleTo16k(chunks: Float32Array[], fromRate: number): Float32Array {
   const total = chunks.reduce((a, c) => a + c.length, 0);
   const input = new Float32Array(total);
@@ -117,28 +145,122 @@ export function resampleTo16k(chunks: Float32Array[], fromRate: number): Float32
     input.set(c, o);
     o += c.length;
   }
-  if (fromRate === 16000) return input;
+  if (fromRate === 16000 || !total) return input;
   const ratio = fromRate / 16000;
   const outLen = Math.floor(total / ratio);
   const out = new Float32Array(outLen);
+  if (ratio < 1) {
+    // Sur-échantillonnage (micro à 8 kHz) : pas de repliement possible, l'interpolation suffit.
+    for (let i = 0; i < outLen; i++) {
+      const x = i * ratio;
+      const i0 = Math.floor(x);
+      const i1 = Math.min(total - 1, i0 + 1);
+      const f = x - i0;
+      out[i] = input[i0] * (1 - f) + input[i1] * f;
+    }
+    return out;
+  }
+  const { half, table } = lowpassKernel(ratio);
   for (let i = 0; i < outLen; i++) {
     const x = i * ratio;
-    const i0 = Math.floor(x);
-    const i1 = Math.min(total - 1, i0 + 1);
-    const f = x - i0;
-    out[i] = input[i0] * (1 - f) + input[i1] * f;
+    const c = Math.floor(x);
+    const from = Math.max(0, c - half + 1);
+    const to = Math.min(total - 1, c + half);
+    let acc = 0;
+    let wsum = 0;
+    for (let k = from; k <= to; k++) {
+      const h = table[Math.round(Math.abs(x - k) * KERNEL_RES)];
+      acc += input[k] * h;
+      wsum += h;
+    }
+    out[i] = wsum ? acc / wsum : 0;
   }
   return out;
 }
 
-/** Nettoie une transcription Whisper (balises et « hallucinations » sur du silence). */
+/** Nettoie une transcription Whisper (balises, « hallucinations » sur du silence, boucles). */
 export function cleanWhisperText(text: string): string {
-  const t = text
+  let t = text
     .replace(/\[[^\]]*\]|\([^)]*\)|\*[^*]*\*/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (/^(you\.?|thank you\.?|thanks for watching!?|bye\.?|\.+)$/i.test(t)) return '';
-  return t;
+  // Whisper part parfois en boucle (« I like it. I like it. I like it. ») : on garde une occurrence.
+  return collapseRepeats(t);
+}
+
+/** Réduit à une occurrence tout groupe de 1 à 6 mots répété au moins 3 fois de suite. */
+export function collapseRepeats(text: string): string {
+  const w = text.split(/\s+/).filter(Boolean);
+  const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9']/g, '');
+  const same = (a: number, b: number, n: number) => {
+    for (let k = 0; k < n; k++) if (key(w[a + k]) !== key(w[b + k])) return false;
+    return true;
+  };
+  const out: string[] = [];
+  let i = 0;
+  while (i < w.length) {
+    let step = 0;
+    for (let n = 1; n <= 6 && i + n * 3 <= w.length; n++) {
+      let reps = 1;
+      while (i + (reps + 1) * n <= w.length && same(i, i + reps * n, n)) reps++;
+      if (reps >= 3) {
+        out.push(...w.slice(i, i + n));
+        step = reps * n;
+        break;
+      }
+    }
+    if (step) i += step;
+    else out.push(w[i++]);
+  }
+  return out.join(' ');
+}
+
+/**
+ * Fusionne deux morceaux de transcription Web Speech. Chrome Android renvoie souvent des résultats
+ * cumulatifs (« I », « I like », « I like cats ») : les concaténer donnait « I I like I like cats ».
+ */
+export function mergeTranscript(prev: string, next: string): string {
+  const p = prev.trim();
+  const n = next.trim();
+  if (!p) return n;
+  if (!n) return p;
+  const np = normalizeLoose(p);
+  const nn = normalizeLoose(n);
+  if (nn === np || nn.startsWith(np + ' ')) return n; // le nouveau résultat contient déjà l'ancien
+  if (nn.includes(' ') && (` ${np} `).includes(` ${nn} `)) return p; // doublon (2 mots ou plus)
+  // Chevauchement fin de l'ancien / début du nouveau (« I like » + « like cats »)
+  const pw = np.split(' ');
+  const nw = nn.split(' ');
+  for (let k = Math.min(pw.length, nw.length); k >= 2; k--) {
+    if (pw.slice(-k).join(' ') === nw.slice(0, k).join(' ')) return `${p} ${n.split(/\s+/).slice(k).join(' ')}`.trim();
+  }
+  return `${p} ${n}`;
+}
+
+function normalizeLoose(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9' ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Texte d'une session Web Speech, reconstruit à chaque événement depuis la liste complète des
+ * résultats (et non accumulé d'un événement à l'autre : Android renvoie les mêmes résultats).
+ */
+export function webSpeechText(results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>): string {
+  let final = '';
+  let interim = '';
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const t = r[0]?.transcript ?? '';
+    if (r.isFinal) final = mergeTranscript(final, t);
+    else interim = mergeTranscript(interim, t);
+  }
+  // Un résultat intermédiaire qui reprend le texte final (Android) ne doit pas le doubler.
+  return mergeTranscript(final, interim);
 }
 
 /* ------------------------------ Whisper ------------------------------ */
@@ -165,7 +287,15 @@ class WhisperService {
     if (this.status.status !== 'loading') {
       this.status = { status: 'loading', progress: 0, detail: 'Téléchargement de Whisper…' };
       this.emit();
-      const gpu = !!(navigator as any).gpu && !!(await (navigator as any).gpu.requestAdapter().catch(() => null));
+      // Téléphone : processeur. Le GPU mobile donne des transcriptions fausses avec le décodeur 4 bits,
+      // et la mémoire manque à côté de la voix. Même repli si un chargement GPU a déjà planté.
+      const gpu =
+        !constrainedDevice() &&
+        interruptedLoads('whisper').device !== 'webgpu' &&
+        !!(navigator as any).gpu &&
+        !!(await (navigator as any).gpu.requestAdapter().catch(() => null));
+      beginLoad('whisper', gpu ? 'webgpu' : 'wasm');
+      this.worker?.terminate();
       this.worker = new Worker(new URL('../workers/stt.worker.ts', import.meta.url), { type: 'module' });
       this.worker.onmessage = (e) => {
         const m = e.data;
@@ -179,10 +309,12 @@ class WhisperService {
           };
           this.emit();
         } else if (m.type === 'ready') {
+          endLoad('whisper');
           this.status = { status: 'ready', progress: 1, detail: 'Whisper prêt (100 % local)' };
           this.readyWaiters.splice(0).forEach((r) => r());
           this.emit();
         } else if (m.type === 'error') {
+          endLoad('whisper');
           this.status = { status: 'error', progress: 0, detail: m.error };
           this.readyWaiters.splice(0).forEach((r) => r());
           this.emit();
@@ -235,6 +367,8 @@ class Segmenter {
   private startedAt = 0;
   private voicedMs = 0;
   private lastPartial = 0;
+  /** Nombre de blocs jusqu'au dernier bloc où l'on entendait la voix. */
+  private voicedUpTo = 0;
   constructor(private o: SegmenterOptions) {}
 
   reset() {
@@ -243,6 +377,16 @@ class Segmenter {
     this.chunks = [];
     this.preroll = [];
     this.voicedMs = 0;
+    this.voicedUpTo = 0;
+  }
+
+  /**
+   * Énoncé sans le long silence de fin (le temps de réflexion avant qu'Emma réponde) : sur du
+   * silence ou du bruit, Whisper invente des mots (« Thank you. ») et transcrit plus lentement.
+   */
+  private trimmed(chunkMs: number): Float32Array[] {
+    const tail = Math.ceil(400 / Math.max(1, chunkMs));
+    return this.chunks.slice(0, Math.min(this.chunks.length, this.voicedUpTo + tail));
   }
 
   push(pcm: Float32Array, rms: number) {
@@ -259,6 +403,7 @@ class Segmenter {
       if (this.loudRun >= 2) {
         this.speaking = true;
         this.chunks = this.preroll.slice();
+        this.voicedUpTo = this.chunks.length;
         this.preroll = [];
         this.startedAt = now;
         this.lastVoice = now;
@@ -272,6 +417,7 @@ class Segmenter {
     if (rms > thresh * 0.7) {
       this.lastVoice = now;
       this.voicedMs += chunkMs;
+      this.voicedUpTo = this.chunks.length;
     }
     if (now - this.lastPartial > (this.o.partialEveryMs ?? 900)) {
       this.lastPartial = now;
@@ -280,7 +426,7 @@ class Segmenter {
     const ended = now - this.lastVoice > this.o.silenceMs();
     const tooLong = now - this.startedAt > (this.o.maxMs ?? 30000);
     if (ended || tooLong) {
-      const seg = this.chunks;
+      const seg = this.trimmed(chunkMs);
       const voiced = this.voicedMs;
       this.reset();
       if (voiced >= 350) this.o.onSegment(seg);
@@ -290,7 +436,8 @@ class Segmenter {
   /** Force la fin de l'énoncé en cours (bouton « J'ai fini »). */
   flush() {
     if (!this.speaking) return;
-    const seg = this.chunks;
+    const last = this.chunks[this.chunks.length - 1];
+    const seg = last ? this.trimmed((last.length / this.o.sampleRate) * 1000) : this.chunks;
     this.reset();
     this.o.onSegment(seg);
   }
@@ -331,8 +478,7 @@ function listenWebSpeech(opts: ListenOptions): ListenHandle {
   rec.interimResults = true;
   rec.maxAlternatives = 1;
 
-  let finalText = '';
-  let interim = '';
+  let text = '';
   let heard = false;
   let aborted = false;
   let failed = false;
@@ -352,16 +498,11 @@ function listenWebSpeech(opts: ListenOptions): ListenHandle {
   }
 
   rec.onresult = (e: any) => {
-    interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const r = e.results[i];
-      if (r.isFinal) finalText += r[0].transcript + ' ';
-      else interim += r[0].transcript;
-    }
+    text = webSpeechText(e.results);
     if (!heard) opts.onSpeechStart?.();
     heard = true;
     lastActivity = performance.now();
-    opts.onInterim?.((finalText + interim).trim());
+    opts.onInterim?.(text);
   };
   rec.onspeechstart = () => {
     lastActivity = performance.now();
@@ -379,7 +520,7 @@ function listenWebSpeech(opts: ListenOptions): ListenHandle {
   };
   rec.onend = () => {
     cleanup();
-    if (!failed) resolveFn(aborted ? '' : (finalText + interim).trim());
+    if (!failed) resolveFn(aborted ? '' : text.trim());
   };
 
   const timer = window.setInterval(() => {
@@ -531,7 +672,9 @@ export class ContinuousListener {
   private paused = false;
   private running = false;
   private interimBusy = false;
+  /** Texte déjà validé de l'énoncé en cours (sessions de reconnaissance terminées). */
   private wsText = '';
+  /** Texte de la session de reconnaissance en cours, reconstruit à chaque résultat. */
   private wsInterim = '';
   private wsLast = 0;
   private wsStart = 0;
@@ -667,7 +810,7 @@ export class ContinuousListener {
     this.micRate = mic.sampleRate;
     this.recTimer = window.setInterval(() => {
       if (this.paused || !this.running) return;
-      const text = (this.wsText + this.wsInterim).trim();
+      const text = mergeTranscript(this.wsText, this.wsInterim);
       if (text && performance.now() - this.wsLast > getState().settings.silenceMs) this.emitWebSpeech();
     }, 150);
     if (!this.paused) this.restartRec();
@@ -675,7 +818,7 @@ export class ContinuousListener {
   }
 
   private emitWebSpeech() {
-    const text = (this.wsText + this.wsInterim).trim();
+    const text = mergeTranscript(this.wsText, this.wsInterim);
     this.wsText = '';
     this.wsInterim = '';
     const chunks = this.ring.filter((c) => c.t >= this.wsStart).map((c) => c.pcm);
@@ -710,16 +853,10 @@ export class ContinuousListener {
       if (this.paused || rec !== this.rec) return;
       // Début d'énoncé : les résultats arrivent avec ~1 s de retard sur la voix.
       if (!this.wsText && !this.wsInterim) this.wsStart = performance.now() - 1500;
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) this.wsText += r[0].transcript + ' ';
-        else interim += r[0].transcript;
-      }
-      this.wsInterim = interim;
+      this.wsInterim = webSpeechText(e.results);
       this.wsLast = performance.now();
       this.ev.onState?.('hearing');
-      this.ev.onInterim?.((this.wsText + this.wsInterim).trim());
+      this.ev.onInterim?.(mergeTranscript(this.wsText, this.wsInterim));
     };
     rec.onerror = (e: any) => {
       if (rec !== this.rec) return;
@@ -742,7 +879,11 @@ export class ContinuousListener {
     };
     // Chrome arrête la reconnaissance après un moment : on la relance tant que le micro est actif.
     rec.onend = () => {
-      if (rec === this.rec && this.running && !this.paused) window.setTimeout(() => this.restartRec(), 250);
+      if (rec !== this.rec) return;
+      // Android arrête la reconnaissance après chaque phrase : on garde ce qui a été dit avant de relancer.
+      this.wsText = mergeTranscript(this.wsText, this.wsInterim);
+      this.wsInterim = '';
+      if (this.running && !this.paused) window.setTimeout(() => this.restartRec(), 250);
     };
     try {
       rec.start();

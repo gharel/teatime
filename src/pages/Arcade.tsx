@@ -34,7 +34,7 @@ export default function Arcade({ game }: { game?: string }) {
       <h2 className="section-title">
         <Icon name="games" /> Mini-jeux
       </h2>
-      <div className="grid-3">
+      <div className="cards-3">
         {GAMES.map((g) => (
           <button key={g.id} className="game-card" onClick={() => navigate(`/jeux/${g.id}`)}>
             <IconBadge icon={gameIcon(g.id)} tone="primary" size={26} className="unit-ico" />
@@ -47,7 +47,7 @@ export default function Arcade({ game }: { game?: string }) {
         ))}
       </div>
 
-      <div className="grid-2 mt-lg">
+      <div className="grid-2 equal-blocks mt-lg">
         <div>
           <h2 className="section-title" style={{ marginTop: 0 }}>
             <Icon name="quests" /> Quêtes du jour

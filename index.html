@@ -5,14 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="description" content="Apprenez l'anglais depuis le français : test de niveau CECRL, exercices, jeux et conversation vocale avec Emma, votre prof IA 100 % locale et gratuite." />
     <meta name="theme-color" content="#FFF9F2" id="meta-theme" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="color-scheme" content="light dark" id="meta-color-scheme" />
+    <!-- L'appli gère ses propres thèmes : on demande aux modes sombres forcés (Dark Reader, mode nuit
+         de Brave iOS) de ne pas inverser ses couleurs (rendu « en négatif »). -->
+    <meta name="darkreader-lock" />
     <!-- GitHub Pages n'envoie pas les en-têtes COOP/COEP : ce service worker les ajoute (isolation
          cross-origin => WASM multi-thread pour la voix et la reconnaissance). Il ne fait rien quand
          l'hébergeur les envoie déjà (serveur de dev, Cloudflare Pages, Netlify). -->
     <script>
       // Réglage par défaut de la bibliothèque (require-corp sur Chrome/Firefox) : « credentialless »
       // servi par un service worker ne garde pas l'isolation au rechargement dans Chrome.
-      window.coi = { quiet: true };
+      window.coi = {
+        quiet: true,
+        // Au plus 2 rechargements par session : si le navigateur ne laisse pas le service worker
+        // prendre la main (mobile, réglages de confidentialité), on évite une boucle de rechargements.
+        doReload: function () {
+          try {
+            var n = +(sessionStorage.getItem('coi-reloads') || 0);
+            if (n >= 2) return;
+            sessionStorage.setItem('coi-reloads', String(n + 1));
+          } catch (e) {}
+          location.reload();
+        },
+      };
       // Page contrôlée par le service worker mais pas isolée (cas observé au 1er rechargement) :
       // un seul rechargement de rattrapage par session.
       try {
@@ -23,15 +38,19 @@
           }
         } else if (window.crossOriginIsolated) {
           sessionStorage.removeItem('coi-retry');
+          sessionStorage.removeItem('coi-reloads');
         }
       } catch (e) {}
     </script>
     <script src="./coi-serviceworker.js"></script>
     <script>
-      // Applique le thème choisi avant le premier rendu (évite le flash clair/sombre).
+      // Applique le thème choisi avant le premier rendu (évite le flash clair/sombre). Le méta
+      // color-scheme suit le thème : « only light » interdit au mode sombre forcé des navigateurs
+      // (Brave, Chrome Android « assombrir les sites ») d'inverser le thème clair.
       try {
         var t = (JSON.parse(localStorage.getItem('teatime-english:v1') || '{}').settings || {}).theme;
         if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+        document.getElementById('meta-color-scheme').setAttribute('content', t === 'light' ? 'only light' : t === 'dark' ? 'dark' : 'light dark');
       } catch (e) {}
     </script>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />

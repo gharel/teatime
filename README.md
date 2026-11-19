@@ -4,7 +4,7 @@ Webapp d'apprentissage de l'anglais **pour francophones**, 100 % gratuite et loc
 
 - **Test de niveau adaptatif** en 20 questions (A1 → C2) avec barre de progression ;
 - **Parcours de 24 unités** (4 par niveau CECRL), 285 exercices, révisions espacées ;
-- **Zone de jeu gamifiée** : XP, série de jours avec jokers, quêtes, badges, 5 mini-jeux ;
+- **Zone de jeu gamifiée** : XP, série de jours avec jokers, quêtes, badges, 8 mini-jeux ;
 - **Emma, prof d'anglais vocale** : avatar 2D illustré avec synchronisation labiale. Elle pose des questions par thème (voyages, travail, vie perso…) et corrige vos fautes à l'oral.
 
 Aucun compte, aucun serveur, aucun service payant : l'IA (dialogue, voix, reconnaissance vocale) tourne **dans le navigateur**.
@@ -39,7 +39,7 @@ npm run build
 npm run preview
 ```
 
-`npm test` lance 68 tests unitaires : correcteur, test adaptatif, contenus, synchronisation labiale. `npm run build` produit le build de production dans `dist/`, et `npm run preview` le sert localement.
+`npm test` lance 118 tests unitaires : correcteur, test adaptatif, contenus, synchronisation labiale, compréhension des réponses par Emma, ré-échantillonnage audio et transcriptions. `npm run build` produit le build de production dans `dist/`, et `npm run preview` le sert localement.
 
 ## Tester sur un téléphone (HTTPS, sans alerte)
 
@@ -64,8 +64,9 @@ Le certificat du serveur est régénéré à chaque lancement pour l'adresse IP 
 | Dialogue / correction | **WebLLM** (MLC) dans un Web Worker, WebGPU | LLM open source exécuté sur le GPU de l'utilisateur. Par défaut Llama 3.2 3B ; au choix Qwen 2.5 1.5B, Llama 3.2 1B, Phi 3.5, Llama 3.1 8B. Le modèle est mis en cache après le 1er téléchargement. |
 | Alternatives IA | **Ollama** (local) · **IA intégrée de Chrome** (Gemini Nano) · **mode scripté** | Ollama pour des modèles plus gros. Le mode scripté fonctionne partout sans IA : questions prédéfinies et correcteur par règles. |
 | Voix d'Emma | **Kokoro-82M** (`kokoro-js`, Apache 2.0) dans un Web Worker | Voix neuronale très naturelle, phrase par phrase. Sur **GPU (WebGPU, ≈ 320 Mo)** choisi automatiquement quand il est disponible, sinon processeur (WASM 8 threads, ≈ 90 Mo) avec un tampon adaptatif anti-saccades. Repli sur la synthèse du système. |
-| Reconnaissance vocale | **Web Speech API** ou **Whisper** (Transformers.js) | Micro **ouvert en permanence** dans la conversation, avec transcription en direct. Web Speech est rapide ; s'il est injoignable (erreur réseau, navigateur intégré), l'app bascule seule sur Whisper, 100 % local. |
-| Analyse de prononciation | **wav2vec2-lv-60-espeak** (Transformers.js, ≈ 320 Mo, WASM) + **eSpeak-NG** (`phonemizer`) | Le modèle transcrit les **phonèmes réellement prononcés**, sans modèle de langue (il ne « corrige » pas). La comparaison avec la prononciation attendue repère les erreurs typiques : TH, H muet, R de gorge, voyelles nasales ou françaises, /ɪ/–/iː/, /æ/, diphtongues… Les mots concernés sont soulignés, avec un conseil en français, et un bilan correctif est proposé en fin de conversation. |
+| Reconnaissance vocale | **Web Speech API** ou **Whisper** (Transformers.js) | Micro **ouvert en permanence** dans la conversation, avec transcription en direct. Web Speech est rapide ; s'il est injoignable (erreur réseau, navigateur intégré, Brave), l'app bascule seule sur Whisper, 100 % local. L'audio est ré-échantillonné à 16 kHz avec un filtre anti-repliement et le silence de fin est retiré avant transcription ; les résultats cumulatifs de Chrome Android sont dédoublonnés. |
+| Compréhension des réponses | **multi-qa-MiniLM-L6** (Transformers.js, ≈ 23 Mo, WASM) + règles | Emma vérifie que la réponse se rapporte à sa question (similarité question → réponse). Hors sujet : elle dit ce qu'elle a entendu et repose la question, ou suit l'apprenant s'il parle d'un autre thème puis revient au plan. Elle répond aux questions qu'on lui pose, repère le français, « je ne sais pas », les demandes de répétition, reprend un détail de la réponse et corrige le temps du verbe (« Where did you go? » → *I went*). Sert aussi d'indice au LLM. |
+| Analyse de prononciation | **wav2vec2-lv-60-espeak** (Transformers.js, ≈ 320 Mo, WASM ; désactivée par défaut sur téléphone) + **eSpeak-NG** (`phonemizer`) | Le modèle transcrit les **phonèmes réellement prononcés**, sans modèle de langue (il ne « corrige » pas). La comparaison avec la prononciation attendue repère les erreurs typiques : TH, H muet, R de gorge, voyelles nasales ou françaises, /ɪ/–/iː/, /æ/, diphtongues… Les mots concernés sont soulignés, avec un conseil en français, et un bilan correctif est proposé en fin de conversation. |
 | Lip-sync | Moteur maison | Phonèmes IPA (fournis par Kokoro) → 14 visèmes, synchronisés avec l'horloge audio et modulés par l'enveloppe audio réelle. Co-articulation entre visèmes. Pour les voix système : graphèmes → visèmes, recalés à chaque mot. |
 | Avatar | SVG animé en `requestAnimationFrame` | Aucun re-render React par frame. Clignements, regard, sourcils, expressions, mouvements de tête ; respecte `prefers-reduced-motion`. |
 | Stockage | `localStorage` + Cache Storage | Progression, révisions et réglages stockés localement, avec export/import JSON. |
@@ -76,6 +77,8 @@ Le certificat du serveur est régénéré à chaque lancement pour l'adresse IP 
 - Chaque moteur IA tourne dans un Web Worker : l'interface reste fluide pendant l'inférence.
 - La réponse du LLM est **streamée** : chaque phrase terminée part aussitôt en synthèse vocale.
 - Préchauffages : Kokoro et WebLLM font une inférence à vide au chargement, pour éviter la latence de compilation à la première réplique.
+- Téléphone : voix sur processeur (8 bits, ≈ 90 Mo) et Whisper sur processeur, analyse de prononciation désactivée par défaut. Chaque chargement de modèle est noté dans `localStorage` : si l'onglet a planté pendant un chargement (mémoire insuffisante), la page ne le relance pas en boucle au rechargement — repli sur le processeur, puis arrêt des chargements automatiques (bouton « Télécharger » pour réessayer).
+- Thèmes : `color-scheme: only light` et `<meta name="darkreader-lock">` empêchent les modes sombres forcés (Brave, Chrome Android « assombrir les sites », Dark Reader) d'inverser le thème clair ; le thème sombre a sa propre palette.
 
 Mesures en Chrome headless sur cette machine :
 
@@ -137,7 +140,7 @@ src/
   tutor/           avatar SVG + moteur pédagogique d'Emma
   components/      exercices, UI partagée
   pages/           accueil, test, parcours, leçon, révisions, jeux, Emma, réglages, méthode
-  games/           5 mini-jeux
+  games/           8 mini-jeux
 docs/ANALYSE.md    benchmark et justification pédagogique
 ```
 

@@ -1,5 +1,6 @@
 /* Service d'analyse de prononciation (Web Worker) : chargement à la demande, file d'analyses. */
 import type { PronResult } from './pronunciation';
+import { beginLoad, endLoad } from './device';
 import { ProgressTracker, type EngineStatus } from './tts';
 
 class PronService {
@@ -23,6 +24,7 @@ class PronService {
     if (this.worker) return;
     this.status = { status: 'loading', progress: 0, detail: 'Préparation de l’analyse de prononciation…' };
     this.emit();
+    beginLoad('pron');
     this.worker = new Worker(new URL('../workers/pron.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e) => {
       const m = e.data;
@@ -36,9 +38,11 @@ class PronService {
         };
         this.emit();
       } else if (m.type === 'ready') {
+        endLoad('pron');
         this.status = { status: 'ready', progress: 1, detail: 'Analyse de prononciation prête (locale)' };
         this.emit();
       } else if (m.type === 'error') {
+        endLoad('pron');
         this.status = { status: 'error', progress: 0, detail: m.error };
         this.waiters.forEach((w) => w(null));
         this.waiters.clear();
@@ -49,6 +53,7 @@ class PronService {
       }
     };
     this.worker.onerror = (e) => {
+      endLoad('pron');
       this.status = { status: 'error', progress: 0, detail: e.message || 'Erreur du worker' };
       this.emit();
     };
