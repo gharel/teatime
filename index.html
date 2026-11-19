@@ -10,7 +10,9 @@
          cross-origin => WASM multi-thread pour la voix et la reconnaissance). Il ne fait rien quand
          l'hébergeur les envoie déjà (serveur de dev, Cloudflare Pages, Netlify). -->
     <script>
-      window.coi = { coepCredentialless: () => !!window.chrome, quiet: true };
+      // Réglage par défaut de la bibliothèque (require-corp sur Chrome/Firefox) : « credentialless »
+      // servi par un service worker ne garde pas l'isolation au rechargement dans Chrome.
+      window.coi = { quiet: true };
     </script>
     <script src="./coi-serviceworker.js"></script>
     <script>
