@@ -10,6 +10,7 @@ import { FALSE_FRIENDS } from '../data/falseFriends';
 import { MINIMAL_PAIRS, TONGUE_TWISTERS } from '../data/pronunciation';
 import { IRREGULAR_VERBS, formMatches, type IrregularVerb } from '../data/irregularVerbs';
 import { COMMON_MISTAKES, type CommonMistake } from '../data/commonMistakes';
+import { PREPOSITIONS, PREPOSITION_ITEMS, fillGap, type Preposition, type PrepositionItem } from '../data/prepositions';
 import { checkAnswer, normalize, pick, shuffle, speechScore } from '../lib/text';
 import { claimQuests, getState, reward, saveBest } from '../lib/store';
 import { say } from '../lib/tts';
@@ -26,6 +27,7 @@ export const GAMES = [
   { id: 'verbes', title: 'Verbes irréguliers', desc: 'Go, went, gone ! 90 secondes pour écrire un maximum de prétérits et de participes.' },
   { id: 'phrase-juste', title: 'Phrase juste ?', desc: '« I am agree » ? Repérez en 60 secondes les fautes typiques des francophones.' },
   { id: 'memory', title: 'Memory des mots', desc: 'Retrouvez les paires anglais–français en retournant le moins de cartes possible.' },
+  { id: 'prepositions', title: 'In, on ou at ?', desc: 'At 9 o’clock, on Monday, in July… 60 secondes pour placer la bonne préposition.' },
 ] as const;
 
 export type GameId = (typeof GAMES)[number]['id'];
@@ -1057,8 +1059,124 @@ export function MemoryMots() {
   );
 }
 
+/* ------------------------------ In, on ou at ? ------------------------------ */
+
+export function Prepositions() {
+  const [phase, setPhase] = useState<'start' | 'play' | 'end'>('start');
+  const [deck, setDeck] = useState<PrepositionItem[]>(() => shuffle(PREPOSITION_ITEMS));
+  const [i, setI] = useState(0);
+  const [score, setScore] = useState(0);
+  const [combo, setCombo] = useState(0);
+  const [answer, setAnswer] = useState<null | { word: Preposition; ok: boolean }>(null);
+  const left = useCountdown(60, phase === 'play', () => setPhase('end'));
+  const item = deck[i % deck.length];
+  const iRef = useRef(i);
+  iRef.current = i;
+
+  const restart = () => {
+    setDeck(shuffle(PREPOSITION_ITEMS));
+    setI(0);
+    setScore(0);
+    setCombo(0);
+    setAnswer(null);
+    setPhase('play');
+  };
+
+  const next = () => {
+    setAnswer(null);
+    setI((v) => v + 1);
+  };
+
+  const choose = (word: Preposition) => {
+    if (answer) return;
+    const ok = word === item.answer;
+    setAnswer({ word, ok });
+    if (ok) {
+      const c = combo + 1;
+      setCombo(c);
+      setScore((s) => s + (c >= 5 ? 2 : 1));
+      sfx('ok');
+      const at = i;
+      window.setTimeout(() => iRef.current === at && next(), 700);
+    } else {
+      setCombo(0);
+      sfx('ko');
+    }
+  };
+
+  useKey(
+    (e) => {
+      if (phase !== 'play') return;
+      const k = Number(e.key);
+      if (k >= 1 && k <= PREPOSITIONS.length) choose(PREPOSITIONS[k - 1]);
+      else if (e.key === 'Enter' && answer && !answer.ok) next();
+    },
+    [phase, answer, item, combo, i],
+  );
+
+  if (phase === 'start')
+    return (
+      <StartCard
+        icon="prepositions"
+        title="In, on ou at ?"
+        desc="60 secondes pour compléter un maximum de phrases avec la bonne préposition de temps ou de lieu : at 9 o’clock, on Monday, in July… Touches 1, 2 et 3 au clavier."
+        onStart={restart}
+      />
+    );
+  if (phase === 'end') return <GameOver game="prepositions" score={score} unit="points" xpFactor={2} onReplay={restart} />;
+
+  const [before, after] = item.text.split('___');
+  return (
+    <div className="narrow">
+      <Hud left={left} score={score} combo={combo} />
+      <div className="card center" style={{ padding: 28 }}>
+        <p className="muted small">Complétez avec in, on ou at.</p>
+        <p className="prep-sentence">
+          {before}
+          {/* Une fois répondu, le trou montre toujours la bonne réponse, donc en vert. */}
+          <span className={'prep-gap' + (answer ? ' ok' : '')}>{answer ? item.answer : '…'}</span>
+          {after}
+        </p>
+      </div>
+      <div className="prep-options mt">
+        {PREPOSITIONS.map((p, k) => (
+          <button
+            key={p}
+            className={'option' + (answer ? (p === item.answer ? ' correct' : p === answer.word ? ' wrong' : '') : '')}
+            style={{ justifyContent: 'center', minHeight: 70, fontSize: '1.3rem' }}
+            onClick={() => choose(p)}
+          >
+            <span className="key">{k + 1}</span>
+            <strong>{p}</strong>
+          </button>
+        ))}
+      </div>
+      {answer && !answer.ok && (
+        <div className="feedback ko">
+          <p style={{ margin: 0 }}>
+            <del>{fillGap(item, answer.word)}</del> → <strong>{fillGap(item)}</strong>
+            <button className="btn ghost sm" style={{ marginLeft: 8 }} onClick={() => void say(fillGap(item))} aria-label="Écouter la phrase">
+              <Icon name="speaker" size={16} />
+            </button>
+          </p>
+          <p className="small" style={{ margin: '6px 0 0' }}>
+            <Rich text={item.tip} />
+          </p>
+          <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 0 }}>
+            <button className="btn primary" autoFocus onClick={next}>
+              Suivant →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function GameRouter({ id }: { id: string }) {
   switch (id) {
+    case 'prepositions':
+      return <Prepositions />;
     case 'verbes':
       return <VerbesIrreguliers />;
     case 'phrase-juste':

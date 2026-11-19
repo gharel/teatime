@@ -315,6 +315,7 @@ const GAME: Record<string, LucideIcon> = {
   verbes: History,
   'phrase-juste': SpellCheck,
   memory: Grid2x2,
+  prepositions: Signpost,
 };
 export const gameIcon = (id: string): LucideIcon => GAME[id] ?? Gamepad2;
 

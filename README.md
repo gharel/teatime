@@ -4,7 +4,7 @@ Webapp d'apprentissage de l'anglais **pour francophones**, 100 % gratuite et loc
 
 - **Test de niveau adaptatif** en 20 questions (A1 → C2) avec barre de progression ;
 - **Parcours de 24 unités** (4 par niveau CECRL), 285 exercices, révisions espacées ;
-- **Zone de jeu gamifiée** : XP, série de jours avec jokers, quêtes, badges, 8 mini-jeux ;
+- **Zone de jeu gamifiée** : XP, série de jours avec jokers, quêtes, badges, 9 mini-jeux ;
 - **Emma, prof d'anglais vocale** : avatar 2D illustré avec synchronisation labiale. Elle pose des questions par thème (voyages, travail, vie perso…) et corrige vos fautes à l'oral.
 
 Aucun compte, aucun serveur, aucun service payant : l'IA (dialogue, voix, reconnaissance vocale) tourne **dans le navigateur**.
@@ -39,7 +39,7 @@ npm run build
 npm run preview
 ```
 
-`npm test` lance 118 tests unitaires : correcteur, test adaptatif, contenus, synchronisation labiale, compréhension des réponses par Emma, ré-échantillonnage audio et transcriptions. `npm run build` produit le build de production dans `dist/`, et `npm run preview` le sert localement.
+`npm test` lance 119 tests unitaires : correcteur, test adaptatif, contenus, synchronisation labiale, compréhension des réponses par Emma, ré-échantillonnage audio et transcriptions. `npm run build` produit le build de production dans `dist/`, et `npm run preview` le sert localement.
 
 ## Tester sur un téléphone (HTTPS, sans alerte)
 
@@ -140,7 +140,7 @@ src/
   tutor/           avatar SVG + moteur pédagogique d'Emma
   components/      exercices, UI partagée
   pages/           accueil, test, parcours, leçon, révisions, jeux, Emma, réglages, méthode
-  games/           8 mini-jeux
+  games/           9 mini-jeux
 docs/ANALYSE.md    benchmark et justification pédagogique
 ```
 

@@ -1051,6 +1051,38 @@ label.field span.hint {
   background: var(--danger-soft);
 }
 
+/* In, on ou at ? : phrase à trou et trois réponses, toujours sur une ligne. */
+.prep-sentence {
+  font-size: 1.5rem;
+  font-weight: 800;
+  line-height: 1.6;
+  margin: 0;
+}
+.prep-gap {
+  display: inline-block;
+  min-width: 2.6em;
+  margin: 0 4px;
+  padding: 0 8px;
+  border-bottom: 3px dashed var(--primary);
+  color: var(--primary);
+  text-align: center;
+}
+.prep-gap.ok {
+  border-bottom-style: solid;
+  border-color: var(--success);
+  color: var(--success);
+}
+.prep-options {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, 1fr);
+}
+@media (max-width: 480px) {
+  .prep-sentence {
+    font-size: 1.25rem;
+  }
+}
+
 /* Memory des mots : 4 × 4 cartes. */
 .memory-grid {
   display: grid;
