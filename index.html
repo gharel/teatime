@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Apprenez l'anglais depuis le français : test de niveau CECRL, exercices, jeux et conversation vocale avec Emma, votre prof IA 100 % locale et gratuite." />
+    <meta name="theme-color" content="#FFF9F2" id="meta-theme" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- GitHub Pages n'envoie pas les en-têtes COOP/COEP : ce service worker les ajoute (isolation
+         cross-origin => WASM multi-thread pour la voix et la reconnaissance). Il ne fait rien quand
+         l'hébergeur les envoie déjà (serveur de dev, Cloudflare Pages, Netlify). -->
+    <script>
+      window.coi = { coepCredentialless: () => !!window.chrome, quiet: true };
+    </script>
+    <script src="./coi-serviceworker.js"></script>
+    <script>
+      // Applique le thème choisi avant le premier rendu (évite le flash clair/sombre).
+      try {
+        var t = (JSON.parse(localStorage.getItem('teatime-english:v1') || '{}').settings || {}).theme;
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <title>Tea Time English</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

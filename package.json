@@ -1,0 +1,33 @@
+{
+  "name": "tea-time-english",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Webapp d'apprentissage de l'anglais pour francophones : test de niveau CECRL, exercices, jeux et prof vocale IA 100 % locale et gratuite.",
+  "scripts": {
+    "dev": "vite",
+    "dev:mobile": "node scripts/dev-mobile.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource-variable/nunito": "5.3.0",
+    "@huggingface/transformers": "3.8.1",
+    "@mlc-ai/web-llm": "0.2.89",
+    "kokoro-js": "1.2.1",
+    "lucide-react": "1.66.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "6.3.0",
+    "node-forge": "1.4.3",
+    "typescript": "5.9.3",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}

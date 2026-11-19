@@ -1,0 +1,11 @@
+{
+  "name": "Tea Time English",
+  "short_name": "Tea Time",
+  "description": "L'anglais pour francophones, avec une prof vocale IA locale et gratuite.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#FFF9F2",
+  "theme_color": "#0E7C74",
+  "lang": "fr",
+  "icons": [{ "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
