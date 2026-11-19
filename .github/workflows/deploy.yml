@@ -24,7 +24,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      # --ignore-scripts : la webapp n'utilise que les moteurs navigateur ; on évite les scripts
+      # d'installation Node (onnxruntime-node télécharge des binaires CUDA introuvables sur Linux).
+      - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run build
       - uses: actions/configure-pages@v6
