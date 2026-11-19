@@ -1,6 +1,7 @@
 /* Service d'analyse de prononciation (Web Worker) : chargement à la demande, file d'analyses. */
 import type { PronResult } from './pronunciation';
-import { beginLoad, endLoad } from './device';
+import { beginLoad, endLoad, interruptedLoads } from './device';
+import { friendlyLoadError } from './download';
 import { ProgressTracker, type EngineStatus } from './tts';
 
 class PronService {
@@ -19,14 +20,43 @@ class PronService {
     this.listeners.forEach((l) => l());
   }
 
-  /** Démarre le téléchargement / chargement (≈ 320 Mo la première fois, puis en cache). */
-  load() {
+  /** Échec : worker neuf au prochain essai, analyses en attente abandonnées. */
+  private fail(detail: string) {
+    endLoad('pron');
+    this.worker?.terminate();
+    this.worker = null;
+    this.status = { status: 'error', progress: 0, detail };
+    this.waiters.forEach((w) => w(null));
+    this.waiters.clear();
+    this.emit();
+  }
+
+  /**
+   * Démarre le téléchargement / chargement (≈ 320 Mo la première fois, puis en cache).
+   * Après un chargement interrompu (onglet planté faute de mémoire ?), seul un essai manuel
+   * (`manual`) relance : sinon chaque conversation replanterait la page.
+   */
+  load({ manual = false }: { manual?: boolean } = {}) {
     if (this.worker) return;
+    if (!manual && interruptedLoads('pron').count > 0) {
+      if (this.status.status !== 'error') {
+        this.status = {
+          status: 'error',
+          progress: 0,
+          detail: 'le chargement précédent n’est pas allé au bout (mémoire insuffisante ?). Touchez « Réessayer »',
+        };
+        this.emit();
+      }
+      return;
+    }
+    this.tracker = new ProgressTracker();
     this.status = { status: 'loading', progress: 0, detail: 'Préparation de l’analyse de prononciation…' };
     this.emit();
     beginLoad('pron');
-    this.worker = new Worker(new URL('../workers/pron.worker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (e) => {
+    const worker = new Worker(new URL('../workers/pron.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = worker;
+    worker.onmessage = (e) => {
+      if (worker !== this.worker) return;
       const m = e.data;
       if (m.type === 'progress') {
         const p = this.tracker.update(m.p ?? {});
@@ -42,32 +72,28 @@ class PronService {
         this.status = { status: 'ready', progress: 1, detail: 'Analyse de prononciation prête (locale)' };
         this.emit();
       } else if (m.type === 'error') {
-        endLoad('pron');
-        this.status = { status: 'error', progress: 0, detail: m.error };
-        this.waiters.forEach((w) => w(null));
-        this.waiters.clear();
-        this.emit();
+        this.fail(friendlyLoadError(m.error));
       } else if (m.type === 'result') {
         this.waiters.get(m.id)?.(m.result);
         this.waiters.delete(m.id);
       }
     };
-    this.worker.onerror = (e) => {
-      endLoad('pron');
-      this.status = { status: 'error', progress: 0, detail: e.message || 'Erreur du worker' };
-      this.emit();
+    worker.onerror = (e) => {
+      if (worker === this.worker) this.fail(friendlyLoadError(e.message || 'Erreur du worker'));
     };
-    this.worker.postMessage({ type: 'load' });
+    worker.postMessage({ type: 'load' });
   }
 
   /** Analyse un énoncé (audio 16 kHz + texte reconnu). Résout null en cas d'échec. */
   analyze(audio: Float32Array, text: string): Promise<PronResult | null> {
     if (this.status.status === 'error') return Promise.resolve(null);
     this.load();
+    const worker = this.worker;
+    if (!worker) return Promise.resolve(null);
     const id = this.nextId++;
     return new Promise((resolve) => {
       this.waiters.set(id, resolve);
-      this.worker!.postMessage({ type: 'analyze', id, audio, text }, [audio.buffer]);
+      worker.postMessage({ type: 'analyze', id, audio, text }, [audio.buffer]);
     });
   }
 }

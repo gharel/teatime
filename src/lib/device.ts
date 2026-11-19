@@ -19,6 +19,50 @@ export function isMobileDevice(): boolean {
   return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1;
 }
 
+/** iPhone / iPad : tous les navigateurs y utilisent WebKit (Safari, Brave, Chrome, Firefox…). */
+export function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1);
+}
+
+/* ------------------------------ Session audio (iOS) ------------------------------
+ * Par défaut, iOS range le son Web Audio dans la catégorie « ambient » : il est coupé
+ * quand l'iPhone est en mode silencieux (bouton latéral) — la voix d'Emma devient
+ * muette alors que le reste fonctionne. L'API Audio Session (WebKit, iOS 16.4+)
+ * permet de demander la catégorie « playback ». Pendant l'écoute, il faut
+ * « play-and-record », posé AVANT getUserMedia (sinon iOS baisse le volume).
+ * Sans cette API (autres navigateurs), ces fonctions ne font rien.
+ */
+
+let activeCaptures = 0;
+
+function setAudioSessionType(type: 'playback' | 'play-and-record') {
+  try {
+    const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+    if (session && session.type !== type) session.type = type;
+  } catch {
+    /* API absente ou refusée */
+  }
+}
+
+/** Avant de jouer la voix : le son sort même en mode silencieux. */
+export function setPlaybackAudioSession() {
+  if (activeCaptures === 0) setAudioSessionType('playback');
+}
+
+/** Avant d'ouvrir le micro. */
+export function beginCaptureAudioSession() {
+  activeCaptures++;
+  setAudioSessionType('play-and-record');
+}
+
+/** Micro refermé. */
+export function endCaptureAudioSession() {
+  activeCaptures = Math.max(0, activeCaptures - 1);
+  if (activeCaptures === 0) setAudioSessionType('playback');
+}
+
 /** Appareil à mémoire limitée : on y évite le GPU pour les modèles et les chargements superflus. */
 export function constrainedDevice(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -65,18 +109,47 @@ export function interruptedLoads(engine: GuardedEngine): { count: number; device
   return e ? { count: e.count, device: e.device } : { count: 0 };
 }
 
-/** À appeler juste avant de lancer un chargement. */
-export function beginLoad(engine: GuardedEngine, device?: string) {
+/** Chargements en cours dans cette page (moteur → appareil). */
+const inProgress = new Map<GuardedEngine, string | undefined>();
+
+function markInProgress(engine: GuardedEngine, device?: string) {
   const g = readGuard();
   g[engine] = { device, count: (atStartup[engine]?.count ?? 0) + 1, t: Date.now() };
   writeGuard(g);
 }
 
+/** À appeler juste avant de lancer un chargement. */
+export function beginLoad(engine: GuardedEngine, device?: string) {
+  inProgress.set(engine, device);
+  markInProgress(engine, device);
+}
+
 /** Chargement terminé (succès ou erreur propre) : la page n'a pas planté. */
 export function endLoad(engine: GuardedEngine) {
+  inProgress.delete(engine);
   delete atStartup[engine];
   const g = readGuard();
   if (!g[engine]) return;
   delete g[engine];
   writeGuard(g);
+}
+
+if (typeof window !== 'undefined') {
+  // Page quittée normalement pendant un chargement (rechargement du service worker d'isolation,
+  // rechargement manuel, navigation) : ce n'est pas un plantage, on ne le compte pas. Un onglet tué
+  // faute de mémoire ne reçoit pas cet événement : il reste compté.
+  window.addEventListener('pagehide', () => {
+    if (!inProgress.size) return;
+    const g = readGuard();
+    inProgress.forEach((_, engine) => {
+      const before = atStartup[engine];
+      if (before) g[engine] = before;
+      else delete g[engine];
+    });
+    writeGuard(g);
+  });
+  // Retour depuis le cache avant/arrière : les chargements reprennent, on les surveille de nouveau.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) inProgress.forEach((device, engine) => markInProgress(engine, device));
+  });
 }

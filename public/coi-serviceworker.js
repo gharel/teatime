@@ -26,6 +26,13 @@ if (typeof window === 'undefined') {
         if (r.cache === "only-if-cached" && r.mode !== "same-origin") {
             return;
         }
+        // [Tea Time] Requêtes CORS vers une autre origine (modèles Hugging Face, CDN) : une réponse CORS
+        // est déjà acceptée sous COEP, la relayer n'apporte rien. Relayés, les téléchargements de
+        // plusieurs centaines de Mo arrivent par petits morceaux et, sur iOS, échouent (« Load failed »)
+        // si le service worker est arrêté en cours de route.
+        if (r.mode === "cors" && new URL(r.url).origin !== self.location.origin) {
+            return;
+        }
 
         const request = (coepCredentialless && r.mode === "no-cors")
             ? new Request(r, {

@@ -12,7 +12,7 @@
  *  - ContinuousListener     : micro ouvert en permanence (conversation avec
  *                             Emma), découpage automatique en énoncés.
  * ------------------------------------------------------------------ */
-import { beginLoad, constrainedDevice, endLoad, interruptedLoads } from './device';
+import { beginCaptureAudioSession, beginLoad, constrainedDevice, endCaptureAudioSession, endLoad, interruptedLoads } from './device';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -75,7 +75,15 @@ class MicCapture {
   node: AudioWorkletNode | null = null;
   sampleRate = 48000;
 
+  private session = false;
+
   async start(onChunk: (pcm: Float32Array, rms: number) => void) {
+    // iOS : catégorie « play-and-record » posée avant d'ouvrir le micro (sinon la voix d'Emma
+    // passe à mi-volume ou dans l'écouteur du haut).
+    if (!this.session) {
+      this.session = true;
+      beginCaptureAudioSession();
+    }
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     });
@@ -99,6 +107,10 @@ class MicCapture {
     this.node = null;
     this.stream = null;
     this.ctx = null;
+    if (this.session) {
+      this.session = false;
+      endCaptureAudioSession();
+    }
   }
 }
 

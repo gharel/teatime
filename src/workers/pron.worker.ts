@@ -8,6 +8,7 @@
 import { AutoModelForCTC, AutoProcessor, env, type PreTrainedModel, type Processor } from '@huggingface/transformers';
 import { phonemize } from 'phonemizer';
 import { assess, splitWords } from '../lib/pronunciation';
+import { retryOnNetworkError } from '../lib/download';
 
 const MODEL = 'onnx-community/wav2vec2-lv-60-espeak-cv-ft-ONNX';
 const VOCAB_URL = `https://huggingface.co/${MODEL}/resolve/main/vocab.json`;
@@ -35,13 +36,17 @@ async function loadVocab(): Promise<Record<string, number>> {
 }
 
 async function load() {
-  const vocab = await loadVocab();
-  idToToken = Object.fromEntries(Object.entries(vocab).map(([k, v]) => [v, k]));
-  processor = await AutoProcessor.from_pretrained(MODEL);
-  model = await AutoModelForCTC.from_pretrained(MODEL, {
-    dtype: 'q8',
-    device: 'wasm',
-    progress_callback: (p: unknown) => ctx.postMessage({ type: 'progress', p }),
+  // Coupure réseau pendant les ≈ 320 Mo (fréquente sur mobile) : on relance, les fichiers déjà
+  // reçus sont en cache.
+  await retryOnNetworkError(async () => {
+    const vocab = await loadVocab();
+    idToToken = Object.fromEntries(Object.entries(vocab).map(([k, v]) => [v, k]));
+    processor = await AutoProcessor.from_pretrained(MODEL);
+    model = await AutoModelForCTC.from_pretrained(MODEL, {
+      dtype: 'q8',
+      device: 'wasm',
+      progress_callback: (p: unknown) => ctx.postMessage({ type: 'progress', p }),
+    });
   });
   // Pré-chauffe
   await phonemize('hello', 'en-us');

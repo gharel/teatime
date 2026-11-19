@@ -4,7 +4,8 @@
  *    phonèmes fournis => synchro labiale précise + enveloppe audio réelle.
  *  - Repli : speechSynthesis du système (instantané, sans téléchargement).
  * ------------------------------------------------------------------ */
-import { beginLoad, constrainedDevice, endLoad, interruptedLoads } from './device';
+import { beginLoad, constrainedDevice, endLoad, interruptedLoads, isIOS, setPlaybackAudioSession } from './device';
+import { friendlyLoadError } from './download';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { getState } from './store';
 
@@ -101,15 +102,44 @@ class TtsService {
   private tracker = new ProgressTracker();
   private systemVoices: SpeechSynthesisVoice[] = [];
   private speakingCount = 0;
+  private speechPrimed = false;
 
   constructor() {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    if (typeof window === 'undefined') return;
+    if ('speechSynthesis' in window) {
       const refresh = () => {
         this.systemVoices = speechSynthesis.getVoices().filter((v) => v.lang.toLowerCase().startsWith('en'));
         this.emit();
       };
       refresh();
       speechSynthesis.addEventListener?.('voiceschanged', refresh);
+    }
+    // iOS n'autorise le son qu'à la suite d'un geste, et suspend (« interrupted ») le contexte audio
+    // quand le micro s'ouvre, après un appel, Siri… : chaque toucher relance ce qui doit l'être.
+    const onGesture = () => {
+      this.primeSystemSpeech();
+      if (this.audioCtx && this.audioCtx.state !== 'running') {
+        setPlaybackAudioSession();
+        void this.audioCtx.resume().catch(() => undefined);
+      }
+    };
+    for (const type of ['touchend', 'click', 'keydown']) window.addEventListener(type, onGesture, { capture: true, passive: true });
+  }
+
+  /**
+   * iOS bloque speechSynthesis tant qu'une première phrase n'a pas été lue pendant un geste de
+   * l'utilisateur ; or Emma parle souvent en réponse à un événement asynchrone. On lit donc une
+   * phrase muette au premier toucher.
+   */
+  private primeSystemSpeech() {
+    if (this.speechPrimed || !isIOS() || !('speechSynthesis' in window)) return;
+    this.speechPrimed = true;
+    try {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      speechSynthesis.speak(u);
+    } catch {
+      /* sans gravité */
     }
   }
 
@@ -146,15 +176,31 @@ class TtsService {
     return vs.slice().sort((a, b) => score(b) - score(a))[0];
   }
 
-  /** Doit être appelé suite à un geste utilisateur (politique d'autoplay). */
-  unlockAudio(): AudioContext {
+  /**
+   * À appeler de préférence suite à un geste utilisateur (politique d'autoplay). Renvoie null si
+   * Web Audio est indisponible : la voix du système prend alors le relais.
+   */
+  unlockAudio(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    // iOS : catégorie « playback », sinon le mode silencieux coupe la voix d'Emma.
+    setPlaybackAudioSession();
+    this.primeSystemSpeech();
     if (!this.audioCtx) {
-      this.audioCtx = new AudioContext();
-      this.analyser = this.audioCtx.createAnalyser();
-      this.analyser.fftSize = 512;
-      this.analyser.connect(this.audioCtx.destination);
+      const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctor) return null;
+      try {
+        const ctx = new Ctor();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 512;
+        analyser.connect(ctx.destination);
+        this.audioCtx = ctx;
+        this.analyser = analyser;
+      } catch {
+        return null;
+      }
     }
-    if (this.audioCtx.state === 'suspended') void this.audioCtx.resume();
+    // « suspended » (autoplay) ou « interrupted » (iOS : micro ouvert, appel, Siri…).
+    if (this.audioCtx.state !== 'running') void this.audioCtx.resume().catch(() => undefined);
     return this.audioCtx;
   }
 
@@ -194,7 +240,7 @@ class TtsService {
       this.kokoro = {
         status: 'error',
         progress: 0,
-        detail: 'le chargement de la voix a été interrompu plusieurs fois (mémoire insuffisante ?). Touchez « Télécharger » pour réessayer',
+        detail: 'le chargement de la voix a été interrompu plusieurs fois (mémoire insuffisante ?). Touchez « Réessayer »',
       };
       this.emit();
       return;
@@ -216,7 +262,7 @@ class TtsService {
       endLoad('kokoro');
       this.worker?.terminate();
       this.worker = null;
-      this.kokoro = { status: 'error', progress: 0, detail: e.message || 'Erreur du worker' };
+      this.kokoro = { status: 'error', progress: 0, detail: friendlyLoadError(e.message || 'Erreur du worker') };
       this.emit();
     };
     this.worker.postMessage({ type: 'load', device });
@@ -245,7 +291,7 @@ class TtsService {
         // Worker neuf au prochain essai (celui-ci peut être dans un état incohérent).
         this.worker?.terminate();
         this.worker = null;
-        this.kokoro = { status: 'error', progress: 0, detail: msg.error };
+        this.kokoro = { status: 'error', progress: 0, detail: friendlyLoadError(msg.error) };
         this.emit();
         break;
       case 'chunk':
@@ -358,11 +404,10 @@ class TtsService {
     const clean = cleanForSpeech(text);
     if (!clean) return Promise.resolve();
     const s = getState().settings;
-    const useKokoro = s.ttsEngine === 'kokoro' && this.kokoro.status === 'ready' && this.worker;
+    const useKokoro = s.ttsEngine === 'kokoro' && this.kokoro.status === 'ready' && !!this.worker && !!this.unlockAudio();
     this.speakingCount++;
     this.emit();
     if (useKokoro) {
-      this.unlockAudio();
       const id = this.nextId++;
       return new Promise<void>((resolve) => {
         this.pending.set(id, {
@@ -386,6 +431,7 @@ class TtsService {
 
   private speakSystem(text: string, rate: number): Promise<void> {
     if (!('speechSynthesis' in window)) return Promise.resolve();
+    setPlaybackAudioSession();
     return new Promise<void>((resolve) => {
       const u = new SpeechSynthesisUtterance(text);
       const v = this.bestSystemVoice();

@@ -73,7 +73,7 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
         </div>
         {settings.ttsEngine === 'kokoro' && (kokoro.status === 'idle' || kokoro.status === 'error') && (
           <button className="btn sm" onClick={() => tts.loadKokoro({ manual: true })}>
-            Télécharger
+            {kokoro.status === 'error' ? 'Réessayer' : 'Télécharger'}
           </button>
         )}
       </div>
@@ -505,7 +505,8 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     open.spoken.forEach((s) => enqueueSpeech(s));
     const g = gen.current;
     // Mains libres : le micro s'ouvre dès le début (il est en pause tant qu'Emma parle).
-    if (getState().settings.pronAnalysis && interruptedLoads('pron').count === 0) pron.load();
+    // (après un chargement interrompu, le service attend un essai manuel : bouton « Réessayer »)
+    if (getState().settings.pronAnalysis) pron.load();
     // Compréhension des réponses (petit modèle local) : prête avant la première réponse.
     session.warmUp();
     if (getState().settings.handsFree) setMic(true);
@@ -851,7 +852,9 @@ function PronEngineRow() {
             ? 'Désactivée'
             : st.status === 'idle'
               ? 'Repère vos erreurs de prononciation (TH, H, R, voyelles…) · modèle local ≈ 320 Mo, chargé au début de la conversation'
-              : st.detail}
+              : st.status === 'error'
+                ? `Erreur : ${st.detail}`
+                : st.detail}
         </div>
         {st.status === 'loading' && (
           <div className="progress thin" style={{ marginTop: 6 }}>
@@ -859,6 +862,11 @@ function PronEngineRow() {
           </div>
         )}
       </div>
+      {enabled && st.status === 'error' && (
+        <button className="btn sm" onClick={() => pron.load({ manual: true })}>
+          Réessayer
+        </button>
+      )}
       <input
         type="checkbox"
         className="toggle"

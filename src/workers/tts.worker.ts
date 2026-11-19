@@ -2,6 +2,7 @@
 /* Synthèse vocale neuronale Kokoro-82M (Apache 2.0), exécutée localement (WebGPU ou WASM multi-thread). */
 import { env } from '@huggingface/transformers';
 import { KokoroTTS, TextSplitterStream } from 'kokoro-js';
+import { isNetworkError, retryOnNetworkError } from '../lib/download';
 
 type Device = 'wasm' | 'webgpu';
 type Msg =
@@ -33,12 +34,13 @@ async function create(device: Device) {
 async function load(device: Device) {
   let used = device;
   try {
-    tts = await create(device);
+    // Coupure réseau (fréquente sur mobile) : on relance, les fichiers déjà reçus sont en cache.
+    tts = await retryOnNetworkError(() => create(device));
   } catch (err) {
-    if (device !== 'webgpu') throw err;
+    if (device !== 'webgpu' || isNetworkError(err)) throw err;
     // GPU incompatible : repli automatique sur le processeur
     used = 'wasm';
-    tts = await create('wasm');
+    tts = await retryOnNetworkError(() => create('wasm'));
   }
   // Préchauffage : la 1re inférence initialise le runtime ; on la fait avant d'annoncer « prêt ».
   try {
