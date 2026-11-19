@@ -285,6 +285,17 @@ class WhisperService {
   private nextId = 1;
   private waiters = new Map<number, (t: string) => void>();
   private readyWaiters: (() => void)[] = [];
+  /**
+   * Transcription lente (téléphone, ≈ 4 s par énoncé sur un iPhone 12 mini) : l'aperçu en direct
+   * occuperait Whisper en continu et la transcription finale attendrait derrière lui. On s'en passe.
+   */
+  slow = false;
+  private avgMs: number | null = null;
+
+  private noteDuration(ms: number) {
+    this.avgMs = this.avgMs === null ? ms : this.avgMs * 0.6 + ms * 0.4;
+    this.slow = this.avgMs > 1500;
+  }
 
   subscribe(l: () => void) {
     this.listeners.add(l);
@@ -321,6 +332,7 @@ class WhisperService {
           };
           this.emit();
         } else if (m.type === 'ready') {
+          if (typeof m.warmMs === 'number') this.noteDuration(m.warmMs);
           endLoad('whisper');
           this.status = { status: 'ready', progress: 1, detail: 'Whisper prêt (100 % local)' };
           this.readyWaiters.splice(0).forEach((r) => r());
@@ -331,6 +343,7 @@ class WhisperService {
           this.readyWaiters.splice(0).forEach((r) => r());
           this.emit();
         } else if (m.type === 'result') {
+          if (typeof m.ms === 'number') this.noteDuration(m.ms);
           this.waiters.get(m.id)?.(m.text);
           this.waiters.delete(m.id);
         }
@@ -629,7 +642,7 @@ function listenWhisper(opts: ListenOptions): ListenHandle {
           opts.onSpeechStart?.();
         },
         onPartial: (chunks) => {
-          if (!opts.onInterim || interimBusy) return;
+          if (!opts.onInterim || interimBusy || whisper.slow) return;
           interimBusy = true;
           void whisper.transcribe(resampleTo16k(chunks, mic.sampleRate)).then((t) => {
             interimBusy = false;
@@ -784,7 +797,7 @@ export class ContinuousListener {
       silenceMs: () => getState().settings.silenceMs,
       onSpeechStart: () => this.ev.onState?.('hearing'),
       onPartial: (chunks) => {
-        if (this.interimBusy) return;
+        if (this.interimBusy || whisper.slow) return;
         this.interimBusy = true;
         void whisper.transcribe(resampleTo16k(chunks, mic.sampleRate)).then((t) => {
           this.interimBusy = false;

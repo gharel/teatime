@@ -72,6 +72,39 @@ interface Staged {
   genMs: number;
 }
 
+/* ------------------------- Vitesse de la voix neuronale -------------------------
+ * rtf = temps de calcul / durée de la voix. Au-delà de 1, la voix se calcule plus lentement
+ * qu'elle ne se parle : sur un iPhone 12 mini (processeur, 1 thread), ≈ 2,7 — Emma mettrait
+ * 10 à 25 s à commencer sa réponse. La voix du système, instantanée, prend alors le relais.
+ * Seuils avec de la marge (la mesure varie avec la charge) : un PC sans GPU tourne autour de 1
+ * et garde la voix neuronale ; sur téléphone, la mémoire qu'elle libère sert aussi à Whisper.
+ * La mesure est gardée par appareil de calcul pour ne pas recharger la voix pour rien.
+ */
+function slowRtf(): number {
+  return constrainedDevice() ? 1.5 : 2.5;
+}
+const SPEED_KEY = 'teatime:kokoro-speed';
+
+function readSpeed(): Partial<Record<'wasm' | 'webgpu', number>> {
+  try {
+    return JSON.parse(localStorage.getItem(SPEED_KEY) || '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSpeed(device: 'wasm' | 'webgpu', rtf: number) {
+  try {
+    localStorage.setItem(SPEED_KEY, JSON.stringify({ ...readSpeed(), [device]: Math.round(rtf * 100) / 100 }));
+  } catch {
+    /* navigation privée */
+  }
+}
+
+function slowDetail(rtf: number): string {
+  return `Voix neuronale trop lente sur cet appareil (${rtf.toFixed(1).replace('.', ',')} s de calcul par seconde de voix) : voix du système, instantanée`;
+}
+
 export async function webgpuAvailable(): Promise<boolean> {
   try {
     const gpu = (navigator as unknown as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
@@ -99,6 +132,8 @@ class TtsService {
   private flushTimer: number | undefined;
   /** Appareil réellement utilisé par Kokoro (après détection / repli). */
   kokoroDevice: 'wasm' | 'webgpu' | null = null;
+  /** Vitesse mesurée de la voix neuronale (temps de calcul / durée de la voix), si connue. */
+  kokoroRtf: number | null = null;
   private tracker = new ProgressTracker();
   private systemVoices: SpeechSynthesisVoice[] = [];
   private speakingCount = 0;
@@ -155,6 +190,16 @@ class TtsService {
     return this.speakingCount > 0;
   }
 
+  /** La voix neuronale se calcule plus lentement qu'elle ne se parle sur cet appareil. */
+  get kokoroTooSlow(): boolean {
+    return this.kokoroRtf !== null && this.kokoroRtf > slowRtf();
+  }
+
+  /** La voix neuronale est chargée et assez rapide (ou gardée malgré sa lenteur). */
+  kokoroUsable(): boolean {
+    return this.kokoro.status === 'ready' && !!this.worker && (!this.kokoroTooSlow || getState().settings.kokoroEvenIfSlow);
+  }
+
   voices(): SpeechSynthesisVoice[] {
     return this.systemVoices;
   }
@@ -170,6 +215,7 @@ class TtsService {
     const score = (v: SpeechSynthesisVoice) =>
       (/natural|neural|online/i.test(v.name) ? 10 : 0) +
       (/google/i.test(v.name) ? 6 : 0) +
+      (/premium|enhanced|améliorée|amelioree/i.test(v.name) ? 8 : 0) +
       (/(aria|jenny|sonia|libby|emma|ava|samantha|serena|female)/i.test(v.name) ? 3 : 0) +
       (v.lang === 'en-US' || v.lang === 'en-GB' ? 2 : 0) +
       (v.localService ? 1 : 0);
@@ -248,6 +294,15 @@ class TtsService {
     this.kokoro = { status: 'loading', progress: 0, detail: 'Téléchargement de la voix neuronale…' };
     this.emit();
     void this.resolveDevice().then((device) => {
+      // Déjà mesurée trop lente ici : inutile de la charger (mémoire et processeur épargnés).
+      const known = readSpeed()[device];
+      if (!manual && !getState().settings.kokoroEvenIfSlow && known !== undefined && known > slowRtf()) {
+        this.kokoroRtf = known;
+        this.kokoroDevice = device;
+        this.kokoro = { status: 'unsupported', progress: 0, detail: slowDetail(known) };
+        this.emit();
+        return;
+      }
       beginLoad('kokoro', device);
       this.startWorker(device);
     });
@@ -283,7 +338,19 @@ class TtsService {
       case 'ready':
         endLoad('kokoro');
         this.kokoroDevice = msg.device ?? null;
-        this.kokoro = { status: 'ready', progress: 1, detail: msg.device === 'webgpu' ? 'Voix neuronale prête (GPU)' : 'Voix neuronale prête (processeur)' };
+        if (typeof msg.rtf === 'number' && Number.isFinite(msg.rtf)) {
+          this.kokoroRtf = msg.rtf;
+          this.rtf = msg.rtf;
+          if (this.kokoroDevice) writeSpeed(this.kokoroDevice, msg.rtf);
+        }
+        if (this.kokoroTooSlow && !getState().settings.kokoroEvenIfSlow) {
+          // Trop lente pour converser : on libère sa mémoire, la voix du système prend le relais.
+          this.worker?.terminate();
+          this.worker = null;
+          this.kokoro = { status: 'unsupported', progress: 0, detail: slowDetail(this.kokoroRtf!) };
+        } else {
+          this.kokoro = { status: 'ready', progress: 1, detail: msg.device === 'webgpu' ? 'Voix neuronale prête (GPU)' : 'Voix neuronale prête (processeur)' };
+        }
         this.emit();
         break;
       case 'error':
@@ -404,7 +471,7 @@ class TtsService {
     const clean = cleanForSpeech(text);
     if (!clean) return Promise.resolve();
     const s = getState().settings;
-    const useKokoro = s.ttsEngine === 'kokoro' && this.kokoro.status === 'ready' && !!this.worker && !!this.unlockAudio();
+    const useKokoro = s.ttsEngine === 'kokoro' && this.kokoroUsable() && !!this.unlockAudio();
     this.speakingCount++;
     this.emit();
     if (useKokoro) {

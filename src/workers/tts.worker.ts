@@ -43,12 +43,19 @@ async function load(device: Device) {
     tts = await retryOnNetworkError(() => create('wasm'));
   }
   // Préchauffage : la 1re inférence initialise le runtime ; on la fait avant d'annoncer « prêt ».
+  // Puis mesure de vitesse (temps de calcul / durée de la voix) : sur un téléphone, la voix peut
+  // être bien plus lente à produire qu'à écouter, et Emma répondrait avec de longues secondes de retard.
+  let rtf: number | undefined;
   try {
     await tts.generate('Hello there.', { voice: 'af_heart' });
+    const t = performance.now();
+    const out = await tts.generate('Nice to meet you. How are you today?', { voice: 'af_heart' });
+    const audioMs = (out.audio.length / out.sampling_rate) * 1000;
+    if (audioMs > 300) rtf = (performance.now() - t) / audioMs;
   } catch {
     /* sans gravité */
   }
-  ctx.postMessage({ type: 'ready', device: used, threads: wasmEnv?.numThreads });
+  ctx.postMessage({ type: 'ready', device: used, threads: wasmEnv?.numThreads, rtf });
 }
 
 async function pump() {

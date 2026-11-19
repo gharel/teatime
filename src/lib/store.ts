@@ -15,6 +15,8 @@ export interface Settings {
   ttsEngine: TtsEngine;
   kokoroVoice: string;
   kokoroDevice: 'auto' | 'wasm' | 'webgpu';
+  /** Garder la voix neuronale même quand l'appareil la produit plus lentement qu'elle ne se parle. */
+  kokoroEvenIfSlow: boolean;
   /** Révision des réglages (migrations). */
   settingsRev: number;
   systemVoice: string;
@@ -112,6 +114,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ttsEngine: 'kokoro',
   kokoroVoice: 'af_heart',
   kokoroDevice: 'auto',
+  kokoroEvenIfSlow: false,
   settingsRev: 3,
   systemVoice: '',
   speechRate: 1,

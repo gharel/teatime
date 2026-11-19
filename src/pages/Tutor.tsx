@@ -55,25 +55,45 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
         </h3>
       )}
       <div className="engine-row">
-        <span className={`status-dot ${settings.ttsEngine === 'system' ? 'ready' : kokoro.status}`} />
+        <span className={`status-dot ${settings.ttsEngine === 'system' || kokoro.status === 'unsupported' ? 'ready' : kokoro.status}`} />
         <div style={{ flex: 1 }}>
           <strong className="small">Voix d'Emma</strong>
           <div className="tiny muted">
             {settings.ttsEngine === 'system'
               ? 'Voix du système'
               : kokoro.status === 'ready'
-                ? `Voix neuronale Kokoro (locale, ${tts.kokoroDevice === 'webgpu' ? 'GPU' : 'processeur'}), prête`
+                ? tts.kokoroTooSlow
+                  ? 'Voix neuronale Kokoro, lente sur cet appareil : Emma répond avec plusieurs secondes de retard'
+                  : `Voix neuronale Kokoro (locale, ${tts.kokoroDevice === 'webgpu' ? 'GPU' : 'processeur'}), prête`
                 : kokoro.status === 'loading'
                   ? kokoro.detail
-                  : kokoro.status === 'error'
-                    ? `Erreur : ${kokoro.detail} — voix du système utilisée`
-                    : 'Voix neuronale Kokoro (≈ 320 Mo sur GPU, 90 Mo sur processeur, une seule fois)'}
+                  : kokoro.status === 'unsupported'
+                    ? kokoro.detail
+                    : kokoro.status === 'error'
+                      ? `Erreur : ${kokoro.detail} — voix du système utilisée`
+                      : 'Voix neuronale Kokoro (≈ 320 Mo sur GPU, 90 Mo sur processeur, une seule fois)'}
           </div>
           {kokoro.status === 'loading' && <Progress value={kokoro.progress} />}
         </div>
         {settings.ttsEngine === 'kokoro' && (kokoro.status === 'idle' || kokoro.status === 'error') && (
           <button className="btn sm" onClick={() => tts.loadKokoro({ manual: true })}>
             {kokoro.status === 'error' ? 'Réessayer' : 'Télécharger'}
+          </button>
+        )}
+        {settings.ttsEngine === 'kokoro' && kokoro.status === 'unsupported' && (
+          <button
+            className="btn sm"
+            onClick={() => {
+              updateSettings({ kokoroEvenIfSlow: true });
+              tts.loadKokoro({ manual: true });
+            }}
+          >
+            Essayer quand même
+          </button>
+        )}
+        {settings.ttsEngine === 'kokoro' && kokoro.status === 'ready' && tts.kokoroTooSlow && (
+          <button className="btn sm" onClick={() => updateSettings({ kokoroEvenIfSlow: false })}>
+            Voix du système
           </button>
         )}
       </div>

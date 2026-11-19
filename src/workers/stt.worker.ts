@@ -34,9 +34,11 @@ async function load(model: string, device: 'wasm' | 'webgpu') {
     if (device !== 'webgpu') throw err;
     asr = await create(model, 'wasm'); // GPU incompatible : repli processeur
   }
-  // Pré-chauffe (compile les shaders / initialise le runtime)
+  // Pré-chauffe (compile les shaders / initialise le runtime), chronométrée : sur un appareil lent,
+  // l'appli renonce à la transcription en direct.
+  const t = performance.now();
   await asr(new Float32Array(16000));
-  ctx.postMessage({ type: 'ready' });
+  ctx.postMessage({ type: 'ready', warmMs: performance.now() - t });
 }
 
 /* Les transcriptions passent une par une (une session ONNX ne supporte pas les appels concurrents). */
@@ -50,9 +52,10 @@ async function pump() {
     try {
       if (!asr) await loading;
       if (!asr) throw new Error('Modèle non chargé');
+      const t = performance.now();
       const out = await asr(job.audio);
       const text = Array.isArray(out) ? out.map((o) => o.text).join(' ') : out.text;
-      ctx.postMessage({ type: 'result', id: job.id, text: text.trim() });
+      ctx.postMessage({ type: 'result', id: job.id, text: text.trim(), ms: performance.now() - t });
     } catch (err) {
       ctx.postMessage({ type: 'result', id: job.id, text: '', error: String(err) });
     }
