@@ -13,6 +13,18 @@
       // Réglage par défaut de la bibliothèque (require-corp sur Chrome/Firefox) : « credentialless »
       // servi par un service worker ne garde pas l'isolation au rechargement dans Chrome.
       window.coi = { quiet: true };
+      // Page contrôlée par le service worker mais pas isolée (cas observé au 1er rechargement) :
+      // un seul rechargement de rattrapage par session.
+      try {
+        if (window.crossOriginIsolated === false && navigator.serviceWorker && navigator.serviceWorker.controller) {
+          if (!sessionStorage.getItem('coi-retry')) {
+            sessionStorage.setItem('coi-retry', '1');
+            location.reload();
+          }
+        } else if (window.crossOriginIsolated) {
+          sessionStorage.removeItem('coi-retry');
+        }
+      } catch (e) {}
     </script>
     <script src="./coi-serviceworker.js"></script>
     <script>
