@@ -141,17 +141,18 @@ export default function Settings() {
             <option value="whisper">Whisper local (Transformers.js) — 100 % privé, ≈ 80 Mo (CPU) à 200 Mo (GPU)</option>
           </select>
           <span className="hint">
-            Dans Chrome, la reconnaissance du navigateur est gratuite mais l'audio est traité par un service en ligne de Google. Whisper
-            fonctionne entièrement sur votre appareil.
+            Dans Chrome, la reconnaissance du navigateur est gratuite mais l'audio est traité par un service en ligne de Google ; elle
+            n'écoute que l'anglais. Whisper fonctionne entièrement sur votre appareil et reconnaît aussi le français : Emma vous aide
+            alors à le dire en anglais.
           </span>
         </label>
         {s.sttEngine === 'whisper' && (
           <label className="field">
             Modèle Whisper
             <select className="input" value={s.whisperModel} onChange={(e) => set({ whisperModel: e.target.value })}>
-              <option value="onnx-community/whisper-tiny.en">Tiny (≈ 40–100 Mo) — le plus rapide</option>
-              <option value="onnx-community/whisper-base.en">Base (≈ 80–200 Mo) — recommandé</option>
-              <option value="onnx-community/whisper-small.en">Small (≈ 250–600 Mo) — le plus précis</option>
+              <option value="onnx-community/whisper-tiny">Tiny (≈ 40–100 Mo) — le plus rapide</option>
+              <option value="onnx-community/whisper-base">Base (≈ 80–200 Mo) — recommandé</option>
+              <option value="onnx-community/whisper-small">Small (≈ 250–600 Mo) — le plus précis</option>
             </select>
           </label>
         )}

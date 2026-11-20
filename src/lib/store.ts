@@ -115,12 +115,13 @@ export const DEFAULT_SETTINGS: Settings = {
   kokoroVoice: 'af_heart',
   kokoroDevice: 'auto',
   kokoroEvenIfSlow: false,
-  settingsRev: 3,
+  settingsRev: 4,
   systemVoice: '',
   speechRate: 1,
   sttEngine: 'webspeech',
   sttLang: 'en-US',
-  whisperModel: 'onnx-community/whisper-base.en',
+  // Multilingue (pas « .en ») : il reconnaît le français au lieu de le traduire en anglais.
+  whisperModel: 'onnx-community/whisper-base',
   silenceMs: 2200,
   llmProvider: 'webllm',
   webllmModel: 'Llama-3.2-3B-Instruct-q4f16_1-MLC',
@@ -170,6 +171,8 @@ function migrateSettings(st: Settings): Settings {
   // v3 : sur téléphone, l'analyse de prononciation (gros modèle) saturait la mémoire avec la voix et
   // Whisper : l'onglet plantait et se rechargeait en boucle. Désactivée par défaut, activable à la main.
   if (s.settingsRev < 3) s = { ...s, pronAnalysis: s.pronAnalysis && !constrainedDevice(), settingsRev: 3 };
+  // v4 : les modèles Whisper « .en » traduisaient en anglais ce que l'apprenant disait en français.
+  if (s.settingsRev < 4) s = { ...s, whisperModel: s.whisperModel.replace(/\.en$/, ''), settingsRev: 4 };
   return s;
 }
 

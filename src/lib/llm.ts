@@ -19,6 +19,8 @@ export interface GenerateOptions {
   signal?: AbortSignal;
   temperature?: number;
   maxTokens?: number;
+  /** Pénalise les mots déjà générés (évite les boucles des petits modèles). WebLLM seulement. */
+  frequencyPenalty?: number;
 }
 
 export const WEBLLM_MODELS: { id: string; label: string; size: string; note: string }[] = [
@@ -195,6 +197,7 @@ class LlmService {
       temperature: opts.temperature ?? 0.7,
       top_p: 0.9,
       max_tokens: opts.maxTokens ?? 220,
+      ...(opts.frequencyPenalty ? { frequency_penalty: opts.frequencyPenalty } : {}),
     });
     let full = '';
     for await (const chunk of stream) {

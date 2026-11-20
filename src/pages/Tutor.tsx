@@ -9,6 +9,7 @@ import { LEVELS } from '../types';
 import { TOPICS } from '../data/topics';
 import Avatar, { type AvatarMood, type AvatarState } from '../tutor/Avatar';
 import { TutorSession, type Correction } from '../tutor/engine';
+import { looksFrench } from '../tutor/understand';
 import { tts } from '../lib/tts';
 import { ContinuousListener, listen, resolveSttEngine, webSpeechSupported, whisper, type ContinuousState } from '../lib/stt';
 import { llm, WEBLLM_MODELS } from '../lib/llm';
@@ -462,7 +463,8 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     listener.current?.pause();
     setInterim('');
     const uid = turnId++;
-    const analyse = !!audio && getState().settings.pronAnalysis && audio.length > 8000;
+    // Pas d'analyse de prononciation anglaise sur une phrase dite en français.
+    const analyse = !!audio && getState().settings.pronAnalysis && audio.length > 8000 && !looksFrench(text);
     setTurns((t) => [...t, { id: uid, role: 'user', text, pron: analyse ? 'pending' : undefined }]);
     if (analyse) {
       // Analyse en parallèle de la réponse d'Emma : les mots à retravailler se soulignent dès qu'elle est prête.
@@ -484,14 +486,16 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
         if (lastUser >= 0 && res.correction) copy[lastUser] = { ...copy[lastUser], correction: res.correction };
         return [...copy, { id: turnId++, role: 'tutor', text: res.reply }];
       });
-      setMood(res.correction ? 'concerned' : 'happy');
+      // Une traduction (l'apprenant a parlé français) n'est pas une faute.
+      const mistake = !!res.correction && !res.correction.translation;
+      setMood(mistake ? 'concerned' : res.correction ? 'neutral' : 'happy');
       userTurns.current++;
       const gained = 5 + (res.correction ? 0 : 3);
       xpRef.current += gained;
       const badges = reward({
         xp: gained,
         day: { tutorTurns: 1 },
-        totals: { tutorTurns: 1, corrections: res.correction ? 1 : 0 },
+        totals: { tutorTurns: 1, corrections: mistake ? 1 : 0 },
         topic: session.topic.id,
       });
       notifyBadges(badges);
@@ -1049,7 +1053,12 @@ function CorrectionCard({ c }: { c: Correction }) {
     <div className="correction">
       <div>
         <Icon name="write" size={16} className="inline-ico" />{' '}
-        {diff.map((d, i) =>
+        {c.translation ? (
+          <>
+            <span className="muted">{c.original}</span> → <ins>{c.corrected}</ins>
+          </>
+        ) : (
+          diff.map((d, i) =>
           d.type === 'same' ? (
             <span key={i}>{d.text} </span>
           ) : d.type === 'del' ? (
@@ -1057,6 +1066,7 @@ function CorrectionCard({ c }: { c: Correction }) {
           ) : (
             <ins key={i}>{d.text} </ins>
           ),
+          )
         )}
       </div>
       {c.explanation && (
@@ -1075,7 +1085,7 @@ function CorrectionCard({ c }: { c: Correction }) {
             </>
           ) : (
             <>
-              <Icon name="replay" size={16} /> Redire correctement
+              <Icon name="replay" size={16} /> {c.translation ? 'Le dire en anglais' : 'Redire correctement'}
             </>
           )}
         </button>

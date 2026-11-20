@@ -49,6 +49,8 @@ export interface Understanding {
   words: number;
   /** Similarité sémantique avec la question (si calculée). */
   sim?: number;
+  /** En français, l'apprenant demande comment dire quelque chose en anglais. */
+  howToSay?: boolean;
 }
 
 /* Seuils calibrés sur le modèle multi-qa-MiniLM-L6 (réponses pertinentes ≥ 0,2 ; hors sujet ≤ 0,18). */
@@ -85,12 +87,15 @@ const ASK_START =
 
 /** Mots français fréquents (sans accents), absents de l'anglais courant. */
 const FR_WORDS = new Set(
-  'je j tu il elle nous vous ils elles le les des du au aux une et est sont suis etait ai avons avez ont mais donc ou ne pas tres bien beaucoup avec dans sur sous par que qui quoi quand comment pourquoi oui non merci bonjour salut bonsoir aime adore deteste fait faire vais vas allons allez voudrais veux peux sais connais ca cela ceci cette ces mes ton ta tes sa ses notre votre leur leurs chez ici voila alors aussi toujours jamais rien tout tous toute moi toi lui eux parce quelque chose euh ben bah anglais francais'.split(
+  'je j tu il elle nous vous ils elles le la les un de des du au aux une et est sont suis etait ai avons avez ont mais donc ou ne n pas tres bien beaucoup avec dans sur sous par que qu qui quoi quand comment pourquoi oui non merci bonjour salut bonsoir aime adore deteste fait faire vais vas allons allez voudrais veux veut peux peut faut sais connais dit dire ca cela ceci ce c cette ces mon ma mes ton ta tes sa ses notre votre leur leurs chez ici voila alors aussi toujours jamais rien tout tous toute moi toi lui eux parce quelque chose euh ben bah anglais francais'.split(
     ' ',
   ),
 );
 const FR_REPEAT = /\b(repete|repeter|repetez|comprends pas|compris|lentement|redis|redire)\b/;
 const FR_DONT_KNOW = /\b(sais pas|ne sais|aucune idee|sais plus|je sais pas)\b/;
+/** « Comment on dit cuisine en anglais ? », « Ça veut dire quoi ? » */
+const FR_HOW_TO_SAY =
+  /\b(comment (est ce qu )?(on )?(dit|dire|traduit|traduire|se dit|ca se dit)|(ca|cela) se dit comment|on dit comment|(que|qu est ce que) veut dire|(ca|cela) veut dire quoi|qu est ce que (ca|cela) veut dire|c est quoi en anglais|en anglais c est|en anglais on dit)\b/;
 
 /** Minuscules sans accents (pour le français). */
 function fold(s: string): string {
@@ -356,6 +361,7 @@ export function understand(text: string, ctx: UnderstandContext, sem?: SemanticS
   const folded = fold(raw);
   if (looksFrench(raw)) {
     if (FR_DONT_KNOW.test(folded)) return { ...base, intent: 'dont-know' };
+    if (FR_HOW_TO_SAY.test(folded)) return { ...base, intent: 'french', howToSay: true };
     if (FR_REPEAT.test(folded)) return { ...base, intent: 'repeat' };
     return { ...base, intent: 'french' };
   }

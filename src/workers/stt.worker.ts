@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 /* Reconnaissance vocale Whisper exécutée localement (Transformers.js) : aucune donnée envoyée. */
 import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
+import { languagePicker } from './whisperLang';
 
 type Msg =
   | { type: 'load'; model: string; device: 'wasm' | 'webgpu' }
@@ -53,9 +54,10 @@ async function pump() {
       if (!asr) await loading;
       if (!asr) throw new Error('Modèle non chargé');
       const t = performance.now();
-      const out = await asr(job.audio);
+      const lang = languagePicker((asr as unknown as { model: { generation_config?: Record<string, any> } }).model.generation_config);
+      const out = await asr(job.audio, lang ? ({ decoder_input_ids: lang.prefix, logits_processor: [lang.process] } as object) : undefined);
       const text = Array.isArray(out) ? out.map((o) => o.text).join(' ') : out.text;
-      ctx.postMessage({ type: 'result', id: job.id, text: text.trim(), ms: performance.now() - t });
+      ctx.postMessage({ type: 'result', id: job.id, text: text.trim(), lang: lang?.detected ?? 'en', ms: performance.now() - t });
     } catch (err) {
       ctx.postMessage({ type: 'result', id: job.id, text: '', error: String(err) });
     }

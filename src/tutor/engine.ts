@@ -13,7 +13,7 @@ import { checkText, type Issue } from '../lib/corrector';
 import { llm, type ChatMessage } from '../lib/llm';
 import { cosine, semantic } from '../lib/semantic';
 import { normalize, pick, speechScore, splitSentences } from '../lib/text';
-import { emmaAnswer, tenseIssue, understand, type SemanticSignal, type Understanding } from './understand';
+import { emmaAnswer, looksFrench, tenseIssue, understand, type SemanticSignal, type Understanding } from './understand';
 
 export type Band = 'A' | 'B' | 'C';
 
@@ -26,6 +26,21 @@ export interface Correction {
   corrected: string;
   explanation: string;
   issues: Issue[];
+  /** L'apprenant a parlé français : « corrected » est la version anglaise à redire. */
+  translation?: boolean;
+}
+
+/** Conduite d'un tour de conversation avec le LLM. */
+interface TurnPlan {
+  /** Consigne au modèle : une seule action, sans alternative. */
+  task: string;
+  /** Question sur laquelle Emma doit finir (ajoutée si le modèle n'en pose pas). */
+  ask?: string;
+  /** Réponse toute faite si le modèle ne produit rien d'utilisable. */
+  fallback: string;
+  /** La question demandée est la suivante du plan. */
+  advancesPlan?: boolean;
+  ended?: boolean;
 }
 
 export interface TutorReply {
@@ -55,6 +70,9 @@ const LEVEL_STYLE: Record<Band, string> = {
   B: 'Use clear, everyday English with a few useful expressions. Keep sentences reasonably short.',
   C: 'Use rich, natural and idiomatic English, as you would with a fluent speaker. You may challenge their ideas.',
 };
+
+/** Longueur maximale d'une réponse parlée d'Emma (mots). */
+const MAX_WORDS: Record<Band, number> = { A: 30, B: 45, C: 55 };
 
 const ACKS: Record<Band, string[]> = {
   A: ['Great!', 'Very good!', 'Nice!', 'Oh, nice!', 'Cool!', 'Thank you!', 'Interesting!', 'Good answer!'],
@@ -151,24 +169,21 @@ export class TutorSession {
     ]);
   }
 
+  /**
+   * Consignes générales, courtes et sans alternatives : la conduite de chaque tour (question à poser,
+   * hors-sujet, détour) est donnée avec le message de l'apprenant (voir planTurn).
+   */
   systemPrompt(): string {
-    const plan = this.questions.map((q, i) => `${i + 1}. ${q.q}`).join('\n');
-    const maxWords = this.band === 'A' ? 30 : this.band === 'B' ? 45 : 55;
     return [
-      `You are Emma, a warm, encouraging and patient English teacher from London. You are having a spoken (voice) conversation with ${this.learnerName || 'a learner'}, a native French speaker whose English level is ${this.level} (CEFR).`,
+      `You are Emma, a warm, encouraging and patient English teacher from London. You are having a spoken (voice) conversation with ${this.learnerName || 'a learner'}, a French speaker who is learning English.`,
       `Topic: ${TOPIC_EN[this.topic.id] ?? this.topic.title}. ${this.topic.scenario}`,
       '',
       'How to speak:',
-      `- This is a voice conversation: reply in 1 to 3 short sentences (maximum ${maxWords} words). No lists, no emojis, no markdown, no stage directions.`,
+      `- Speak English only, in 1 to 3 short sentences (maximum ${MAX_WORDS[this.band]} words), like in a real conversation.`,
+      '- Never write lists, emojis, markdown, brackets, notes, or comments about the conversation.',
       `- ${LEVEL_STYLE[this.band]}`,
-      '- First react briefly and naturally to what the learner said (show interest, add a short personal comment), then ask exactly ONE question to keep them talking.',
-      '- Stay on the topic. If the learner is stuck or speaks French, encourage them kindly in simple English and rephrase your question.',
-      '',
-      'Listening (very important):',
-      '- Always respond to what the learner ACTUALLY said, and mention a concrete detail of it. Never ignore their message and never pretend they answered your question if they did not.',
-      '- If their message does not answer your question (unrelated, another subject): react to it first. Then either follow their idea with a related question, or gently come back to your question.',
-      '- If their message is confusing or makes no sense (it may be a speech-recognition error), say what you understood and ask them to repeat or rephrase.',
-      '- If they ask you a question, answer it briefly and personally (you are Emma, from London), then continue.',
+      '- Always react to what the learner actually said, then ask only ONE question.',
+      '- After each learner message, you get a secret plan for your reply: follow it, but never mention it.',
       '',
       'Correcting:',
       '- Check ONLY the learner’s last message for real mistakes: grammar, vocabulary, word choice, word order, typical French-speaker errors.',
@@ -179,9 +194,6 @@ export class TutorSession {
       'CORRECTION: <the corrected learner sentence, or NONE>',
       'EXPLICATION: <one short explanation in French of the main mistake, or NONE>',
       'REPLY: <your spoken reply in English>',
-      '',
-      'Conversation plan (questions you can ask, in order, adapting to the conversation):',
-      plan,
     ].join('\n');
   }
 
@@ -273,7 +285,18 @@ export class TutorSession {
       return { correction: null, spoken: [bye], reply: bye, ended: true };
     }
 
-    const rules = u.intent === 'french' ? null : this.ruleCheck(text, askedText);
+    if (u.intent === 'french') {
+      if (llm.ready) {
+        try {
+          const r = await this.respondFrench(text, u, onSentence, signal);
+          if (r) return r;
+        } catch (err) {
+          console.warn('Traduction indisponible, repli sur le mode scripté', err);
+        }
+      }
+      return this.respondScripted(text, null, onSentence, u, vec);
+    }
+    const rules = this.ruleCheck(text, askedText);
     if (llm.ready) {
       try {
         return await this.respondLLM(text, rules, onSentence, signal, u, vec);
@@ -448,6 +471,109 @@ export class TutorSession {
     return { correction: rules, spoken, reply, ended };
   }
 
+  /**
+   * Ce qu'Emma fait à ce tour, décidé ici et non par le modèle : les petits modèles locaux suivent mal
+   * les consignes à tiroirs (« si…, sinon… ») et finissent par les recopier en monologue.
+   * Met à jour l'état (détour, hors-sujet, plan) comme le mode scripté.
+   */
+  private planTurn(text: string, u: Understanding, vec?: Float32Array): TurnPlan {
+    const asked = this.lastQuestionText();
+    switch (u.intent) {
+      case 'question':
+        return {
+          task: `The learner asked you a question. Answer it briefly as Emma, then ask again: "${asked}"`,
+          ask: asked,
+          fallback: `${emmaAnswer(u.question, this.topic.id)} ${pick(['Now, back to you.', 'But tell me about you.', 'Your turn!'])} ${asked}`,
+        };
+      case 'dont-know': {
+        const starter = this.awaitingQuestion().starters[0];
+        return {
+          task: `The learner does not know what to say. Give a very short example answer to your question, then encourage them to try.${starter ? ` They can start with: "${starter}"` : ''}`,
+          fallback: starter ? `No problem! You can start like this: "${starter}" Give it a try!` : `No problem! Take your time. ${asked}`,
+        };
+      }
+      case 'greeting':
+      case 'thanks':
+        return {
+          task: `Answer in a few friendly words, then ask again: "${asked}"`,
+          ask: asked,
+          fallback: `${u.intent === 'greeting' ? 'Hello!' : "You're welcome!"} ${asked}`,
+        };
+      case 'off-topic': {
+        const q2 = !this.detour && u.otherTopic ? this.detourQuestion(u.otherTopic, vec) : undefined;
+        if (q2 && u.otherTopic) {
+          // L'apprenant parle d'autre chose : Emma suit son idée, puis reviendra au thème.
+          this.detour = { topicId: u.otherTopic, q: q2 };
+          this.usedDetours.add(q2.q);
+          this.offTopicStreak = 0;
+          const about = OTHER_TOPIC_EN[u.otherTopic] ?? 'that';
+          return {
+            task: `The learner is now talking about ${about}. Follow them: react to what they said in one short sentence, then ask: "${q2.q}"`,
+            ask: q2.q,
+            fallback: `Oh, you're talking about ${about}! ${q2.q}`,
+          };
+        }
+        if (this.offTopicStreak === 0) {
+          this.offTopicStreak = 1;
+          return {
+            task: `This message does not answer your question. React to what they said in one short sentence, or say that you did not understand. Then ask your question again: "${asked}"`,
+            ask: asked,
+            fallback: this.clarify(text, this.awaitingQuestion()),
+          };
+        }
+        // Deuxième fois : on n'insiste pas, on change de question.
+        this.offTopicStreak = 0;
+        this.askedFollowUp = false;
+        const nxt = this.nextPlanQuestion();
+        if (!nxt) return this.closingPlan();
+        return {
+          task: `Say kindly that it is no problem, then ask this new question: "${nxt.q}"`,
+          ask: nxt.q,
+          fallback: `${pick(["No problem, let's try another question.", "OK, let's talk about something else."])} ${nxt.q}`,
+        };
+      }
+      default: {
+        this.offTopicStreak = 0;
+        const aside = u.asksBack ? ' They also asked you a question: answer it briefly first.' : '';
+        const asideText = u.asksBack ? ` ${emmaAnswer(u.question, this.topic.id)}` : '';
+        if (this.detour) {
+          this.detour = null;
+          const back = this.awaitingQuestion().q;
+          const topic = simpleTopic(this.topic.id);
+          return {
+            task: `React to a concrete detail of their answer in one short sentence.${aside} Then say "Now, let's go back to ${topic}." and ask: "${back}"`,
+            ask: back,
+            fallback: `${this.reaction(u)}${asideText} Now, let's go back to ${topic}. ${back}`,
+          };
+        }
+        const next = this.questions[this.qIndex];
+        if (!next) {
+          return {
+            task: `React to a concrete detail of their answer in one short sentence.${aside} Then ask one more simple question about what they said.`,
+            fallback: `${this.reaction(u)}${asideText} ${pick(['Can you tell me a little more?', 'Can you give me an example?'])}`,
+          };
+        }
+        return {
+          task: `React to a concrete detail of their answer in one short sentence.${aside} Then ask: "${next.q}"`,
+          ask: next.q,
+          advancesPlan: true,
+          fallback: `${this.reaction(u)}${asideText} ${next.q}`,
+        };
+      }
+    }
+  }
+
+  private closingPlan(): TurnPlan {
+    return {
+      task: 'Thank the learner warmly for this conversation and say goodbye.',
+      fallback:
+        this.band === 'A'
+          ? 'Thank you! You did a great job today. See you soon!'
+          : 'That was a lovely conversation, thank you! You did really well today. See you next time!',
+      ended: true,
+    };
+  }
+
   private async respondLLM(
     text: string,
     rules: Correction | null,
@@ -458,96 +584,149 @@ export class TutorSession {
   ): Promise<TutorReply> {
     if (u.intent === 'answer' || u.intent === 'short') this.markAnswered(vec, u.sim);
     while (this.qIndex < this.questions.length && this.answered.has(this.qIndex)) this.qIndex++;
-    const next = this.questions[this.qIndex];
-    const asked = this.lastQuestionText();
-    const notes: string[] = [];
+    const plan = this.planTurn(text, u, vec);
+    const tasks = [plan.task];
     if (rules) {
-      notes.push(
-        `[Automatic checker detected: ${rules.issues.map((i) => `"${i.original}" -> "${i.suggestion}"`).join('; ')}. Include these fixes in CORRECTION.]`,
+      tasks.unshift(
+        `An automatic checker found: ${rules.issues.map((i) => `"${i.original}" -> "${i.suggestion}"`).join('; ')}. Include these fixes in CORRECTION.`,
       );
-    }
-    switch (u.intent) {
-      case 'off-topic':
-        notes.push(
-          `[Careful: this message does not seem to answer your question ("${asked}"). Do not pretend it does and do not move on to a new planned question. React to what they actually said${
-            u.otherTopic ? ` (they seem to be talking about ${OTHER_TOPIC_EN[u.otherTopic] ?? u.otherTopic})` : ''
-          }: if it makes sense, follow their idea with a related question or gently come back to your question; if it is confusing (maybe a speech-recognition error), say what you understood and ask them to repeat or rephrase.]`,
-        );
-        break;
-      case 'question':
-        notes.push(`[The learner asked you a question: answer it briefly and personally as Emma, then ask again: "${asked}"]`);
-        break;
-      case 'french':
-        notes.push('[The learner spoke French: kindly ask them to try in English and give them a simple sentence starter. CORRECTION: NONE.]');
-        break;
-      case 'dont-know':
-        notes.push('[The learner does not know what to say: give a short example answer and a sentence starter, then encourage them to try.]');
-        break;
-      case 'greeting':
-      case 'thanks':
-        notes.push(`[Respond naturally, then ask again: "${asked}"]`);
-        break;
-      default:
-        if (u.asksBack) notes.push('[The learner also asked you a question: answer it briefly and personally first.]');
-        if (next) notes.push(`[The learner answered. React to a concrete detail of their answer, then move on to: "${next.q}"]`);
-        else notes.push('[The plan is complete: thank the learner warmly and ask one last light question.]');
     }
 
     const recent = this.history.slice(-11, -1);
     const messages: ChatMessage[] = [
       { role: 'system', content: this.systemPrompt() },
       ...recent,
-      { role: 'user', content: `${text}\n\n${notes.join('\n')}` },
+      { role: 'user', content: `${text}\n\n---\nPlan for your reply (secret, never mention it): ${tasks.join(' ')}` },
     ];
 
     const stream = new StreamParser();
-    let spokenCorrection = false;
+    const guard = new ReplyGuard(this.band, !!plan.ask);
+    // Le garde-fou arrête la génération dès que la réponse est complète (ou part en vrille).
+    const stop = new AbortController();
+    const onAbort = () => stop.abort();
+    signal?.addEventListener('abort', onAbort);
     const spoken: string[] = [];
+    const say = (s: string) => {
+      spoken.push(s);
+      onSentence(s);
+    };
+    let spokenCorrection = false;
     let correction: Correction | null = null;
 
     const emitCorrectionIfAny = () => {
       if (spokenCorrection) return;
       spokenCorrection = true;
       correction = this.mergeCorrection(text, stream.correction, stream.explanation, rules);
-      if (correction) {
-        const s = this.correctionSpeech(correction);
-        spoken.push(s);
-        onSentence(s);
+      if (correction) say(this.correctionSpeech(correction));
+    };
+    const flush = (final: boolean) => {
+      for (const s of stream.takeSentences(final)) {
+        if (guard.stopped) break;
+        const kept = guard.push(s);
+        if (kept) say(kept);
       }
+      if (guard.stopped) stop.abort();
     };
 
-    const raw = await llm.generate(messages, {
-      signal,
-      temperature: 0.6,
-      maxTokens: 230,
-      onToken: (_d, full) => {
-        stream.feed(full);
-        if (stream.replyStarted) {
-          emitCorrectionIfAny();
-          for (const s of stream.takeSentences()) {
-            spoken.push(s);
-            onSentence(s);
+    let raw = '';
+    try {
+      raw = await llm.generate(messages, {
+        signal: stop.signal,
+        temperature: 0.5,
+        maxTokens: 200,
+        frequencyPenalty: 0.3,
+        onToken: (_d, full) => {
+          if (stop.signal.aborted) return;
+          stream.feed(full);
+          if (stream.replyStarted) {
+            emitCorrectionIfAny();
+            flush(false);
           }
-        }
-      },
-    });
-    stream.feed(raw, true);
-    if (!stream.reply.trim() && !spokenCorrection) {
-      // Le modèle n'a pas respecté le format : on se rabat sur le scripté.
-      return this.respondScripted(text, rules, onSentence, u, vec);
+        },
+      });
+    } catch (err) {
+      if (!stop.signal.aborted) console.warn('Réponse de l’IA interrompue', err);
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
+    if (!guard.stopped && raw) {
+      stream.feed(raw, true);
+      if (stream.replyStarted) {
+        emitCorrectionIfAny();
+        flush(true);
+      }
+    }
+    // Pas de réponse exploitable : la correction (modèle ou règles) est quand même donnée.
     emitCorrectionIfAny();
-    for (const s of stream.takeSentences(true)) {
-      spoken.push(s);
-      onSentence(s);
+
+    let reply = guard.text;
+    let ownQuestion = false;
+    if (!signal?.aborted) {
+      if (!reply) {
+        // Rien d'utilisable (format non respecté, monologue, hors sujet) : réponse toute faite.
+        reply = plan.fallback;
+        say(reply);
+        ownQuestion = true;
+      } else if (plan.ask && !guard.asked) {
+        // Emma doit toujours relancer la conversation.
+        say(plan.ask);
+        reply = `${reply} ${plan.ask}`;
+        ownQuestion = true;
+      }
     }
-    let reply = stream.reply.trim() || this.lastQuestionText();
-    // On n'avance dans le plan que si l'apprenant a répondu (ou si le modèle a posé la question suivante).
-    if (next && /\?/.test(reply) && similarQuestion(reply, next.q)) this.qIndex++;
-    else if (next && u.intent === 'answer' && this.history.filter((m) => m.role === 'user').length % 2 === 0) this.qIndex++;
-    reply = reply.replace(/\s+/g, ' ');
+    if (plan.advancesPlan && plan.ask) {
+      // On n'avance dans le plan que si la question suivante a été posée (ou une réponse sur deux).
+      if (ownQuestion || similarQuestion(reply, plan.ask)) this.qIndex++;
+      else if (u.intent === 'answer' && this.history.filter((m) => m.role === 'user').length % 2 === 0) this.qIndex++;
+    }
+    reply = reply.replace(/\s+/g, ' ').trim();
     this.history.push({ role: 'assistant', content: reply });
     this.lastSpoken = spoken.join(' ');
+    return { correction, spoken, reply, ended: plan.ended };
+  }
+
+  /**
+   * L'apprenant a parlé français : Emma lui donne la phrase en anglais à redire, ou répond à
+   * « Comment on dit… ? ». Consigne minimale (traduction seule) : fiable même avec un petit modèle.
+   */
+  private async respondFrench(
+    text: string,
+    u: Understanding,
+    onSentence: (s: string) => void,
+    signal?: AbortSignal,
+  ): Promise<TutorReply | null> {
+    const system = u.howToSay
+      ? 'You help a French speaker who is learning English. They ask, in French, how to say something in English. Write ONLY the English word or sentence they are looking for, with no explanation.'
+      : 'Translate the French text into simple, natural English. Write ONLY the English translation, with no explanation.';
+    const out = await llm.generate(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: text },
+      ],
+      { signal, temperature: 0.2, maxTokens: 60 },
+    );
+    const en = cleanTranslation(out);
+    if (!en || signal?.aborted) return null;
+    const quoted = `"${en}"`;
+    const spoken = u.howToSay
+      ? [`${pick(['In English, we say:', 'We say:'])} ${quoted}`, this.lastQuestionText()]
+      : [
+          `${pick(['In English, you can say:', 'In English, we say:'])} ${quoted}`,
+          pick(['Now you try!', 'Your turn, say it in English!', 'Try to say it in English!']),
+        ];
+    spoken.forEach(onSentence);
+    const reply = spoken.join(' ');
+    this.history.push({ role: 'assistant', content: reply });
+    this.lastSpoken = reply;
+    const correction: Correction = {
+      original: text,
+      corrected: en,
+      explanation: u.howToSay
+        ? 'Votre question en français, et sa réponse en anglais.'
+        : 'Vous avez parlé français : voici comment le dire en anglais. Entraînez-vous à le redire !',
+      issues: [],
+      translation: true,
+    };
     return { correction, spoken, reply };
   }
 
@@ -632,4 +811,112 @@ export class StreamParser {
     this.emitted = Math.max(this.emitted, complete.length);
     return out;
   }
+}
+
+/* ------------------------------ Garde-fou des réponses du LLM ------------------------------ */
+
+/**
+ * Le modèle parle de la conversation au lieu de parler à l'apprenant (« If the learner is not in the
+ * kitchen, I will ask a simpler question for an A2 learner… ») : phrases à ne jamais dire.
+ */
+const META =
+  /\b(learners?|the user|CEFR|instructions?|secret plan|plan for your reply|conversation plan|speech[- ]recognition|I will ask|I'll ask|my next question)\b|\b(correction|explication|explanation|reply)\s*:|\b[ABC][12]\b/i;
+
+/** Question qui relance vraiment la conversation (pas « Really? » ni l'écho « Spain? »). */
+function isRealQuestion(s: string): boolean {
+  if (!/\?["'”)]*$/.test(s)) return false;
+  const n = normalize(s);
+  return n.split(' ').length >= 3 && (/\byou(r|rs|rself)?\b/.test(n) || /^(and |so |but |oh |well )?(what|where|when|why|how|who|which|do|does|did|is|are|was|were|can|could|would|will|have|has|should)\b/.test(n));
+}
+
+/** Retire ce qui n'est pas à dire à voix haute : apartés entre parenthèses ou crochets, markdown, étiquettes. */
+function cleanSentence(s: string): string {
+  return s
+    .replace(/\([^)]*\)?|\[[^\]]*\]?|\{[^}]*\}?/g, ' ')
+    .replace(/[*_#`]+/g, '')
+    .replace(/^\s*(emma|teacher)\s*:\s*/i, '')
+    .replace(/\s+([,.!?])/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Le modèle tourne en boucle (« 2nd level, 3A1, 2nd level or 2nd level… »). */
+function looping(s: string): boolean {
+  const w = normalize(s).split(' ');
+  const seen = new Map<string, number>();
+  for (let i = 0; i + 1 < w.length; i++) {
+    const k = `${w[i]} ${w[i + 1]}`;
+    const c = (seen.get(k) ?? 0) + 1;
+    if (c >= 3) return true;
+    seen.set(k, c);
+  }
+  return false;
+}
+
+/**
+ * Filtre phrase par phrase la réponse en flux, avant la synthèse vocale : Emma dit au plus quelques
+ * phrases et s'arrête après sa question ; les apartés, le méta-discours et les boucles sont écartés
+ * (et la génération coupée). Les petits modèles locaux partent sinon en monologue.
+ */
+export class ReplyGuard {
+  stopped = false;
+  private kept: string[] = [];
+  private words = 0;
+  private readonly maxWords: number;
+  private readonly maxSentences: number;
+
+  /** @param mustAsk le moteur impose une question : on garde moins de phrases avant elle. */
+  constructor(band: Band, mustAsk = false) {
+    this.maxWords = Math.round(MAX_WORDS[band] * 1.3);
+    this.maxSentences = mustAsk ? (band === 'A' ? 2 : 3) : band === 'C' ? 4 : 3;
+  }
+
+  /** Phrase à dire (nettoyée), ou null si elle est écartée. */
+  push(raw: string): string | null {
+    if (this.stopped) return null;
+    const meta = META.test(raw);
+    if (meta && this.kept.length) {
+      // Le modèle commente la conversation : la suite ne sera pas meilleure.
+      this.stopped = true;
+      return null;
+    }
+    const s = cleanSentence(raw);
+    if (!/[a-z]/i.test(s) || META.test(s)) return null;
+    const n = normalize(s).split(' ').length;
+    const repeated = this.kept.some((k) => normalize(k) === normalize(s));
+    if (repeated || looping(s) || this.words + n > this.maxWords) {
+      this.stopped = true;
+      return null;
+    }
+    this.kept.push(s);
+    this.words += n;
+    if (isRealQuestion(s) || this.kept.length >= this.maxSentences) this.stopped = true;
+    return s;
+  }
+
+  get text(): string {
+    return this.kept.join(' ');
+  }
+
+  /** Emma a posé une vraie question. */
+  get asked(): boolean {
+    return this.kept.some(isRealQuestion);
+  }
+}
+
+/** Nettoie la traduction renvoyée par le modèle ; vide si elle est inutilisable. */
+export function cleanTranslation(out: string): string {
+  const line = out
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line) return '';
+  const t = line
+    .replace(/^(here is|here's) [^:]*:\s*/i, '')
+    .replace(/^(english|translation|in english|answer|emma)\s*:\s*/i, '')
+    .replace(/^["“«'\s]+|["”»'\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!/[a-z]/i.test(t) || looksFrench(t) || /\btranslat/i.test(t) || t.split(' ').length > 30) return '';
+  return t;
 }
