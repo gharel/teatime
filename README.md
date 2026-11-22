@@ -74,7 +74,8 @@ Le certificat du serveur est régénéré à chaque lancement pour l'adresse IP 
 ### Performance
 
 - `vite.config.ts` envoie les en-têtes `COOP: same-origin` et `COEP: credentialless`. La page est alors `crossOriginIsolated`, ce qui active le WASM multi-thread d'onnxruntime (Kokoro, Whisper) tout en autorisant le téléchargement des modèles depuis Hugging Face.
-- Chaque moteur IA tourne dans un Web Worker : l'interface reste fluide pendant l'inférence.
+- Chaque moteur IA tourne dans un Web Worker : l'interface reste fluide pendant l'inférence. Sur iPhone / iPad, la voix, Whisper et la compréhension partagent un seul worker, donc un seul onnxruntime et un seul tas mémoire WASM (qui ne fait que grandir) : séparés, ils dépassaient la mémoire qu'iOS accorde à l'onglet, qui plantait et se rechargeait en pleine conversation (≈ 1,8 Go contre ≈ 1 Go mesurés).
+- Rechargement automatique (une fois) si un module de page est introuvable après une mise à jour, ou si la voix échoue ou se bloque au chargement. Une page tuée en pleine conversation est détectée au lancement suivant (Réglages → « Diagnostic audio »).
 - La réponse du LLM est **streamée** : chaque phrase terminée part aussitôt en synthèse vocale.
 - Préchauffages : Kokoro et WebLLM font une inférence à vide au chargement, pour éviter la latence de compilation à la première réplique.
 - iPhone / iPad : la voix passe par Web Audio avec la session audio « playback » (audible en mode silencieux), et le micro est réellement refermé pendant qu'Emma parle, puis rouvert : micro ouvert, iOS bascule en session d'appel (voix dans l'écouteur, très faible, voire coupée). Réglages → « Diagnostic audio » affiche l'état en direct si Emma reste muette.
@@ -97,7 +98,7 @@ Mesures en Chrome headless sur cette machine :
 
 **GitHub Pages (en place)** : le workflow `.github/workflows/deploy.yml` lance les tests, construit l'appli et la publie à chaque push sur `main`.
 
-Pour le multi-thread WASM, l'hébergeur doit envoyer les en-têtes COOP/COEP. Le fichier `public/_headers` est pris en charge par Netlify et Cloudflare Pages. GitHub Pages ne les envoie pas : le service worker `public/coi-serviceworker.js` (MIT) les ajoute, au prix d'un rechargement automatique à la toute première visite. Sans ces en-têtes, l'app fonctionne quand même : la voix neuronale est simplement plus lente en mode CPU, et WebGPU n'est pas concerné.
+Pour le multi-thread WASM, l'hébergeur doit envoyer les en-têtes COOP/COEP. Le fichier `public/_headers` est pris en charge par Netlify et Cloudflare Pages. GitHub Pages ne les envoie pas : le service worker `public/coi-serviceworker.js` (MIT) les ajoute, au prix d'un rechargement automatique à la toute première visite. Il n'est pas installé sur iPhone / iPad : WebKit ne gère pas `credentialless`, il n'y apporterait que des rechargements. Sans ces en-têtes, l'app fonctionne quand même : la voix neuronale est simplement plus lente en mode CPU, et WebGPU n'est pas concerné.
 
 ## Utiliser Ollama (facultatif)
 
@@ -137,7 +138,7 @@ $env:OLLAMA_ORIGINS="*"; ollama serve
 src/
   data/            contenus : test (72 q.), leçons A1→C2, thèmes du tuteur, faux amis, paires minimales
   lib/             store + gamification, test adaptatif, correcteur, texte, TTS, STT, LLM, lip-sync
-  workers/         Kokoro / Piper (TTS), Whisper (STT), WebLLM (LLM)
+  workers/         Kokoro / Piper (TTS), Whisper (STT), MiniLM, WebLLM (LLM) ; *.core.ts servis seuls ou dans models.worker.ts (iPhone)
   tutor/           avatar SVG + moteur pédagogique d'Emma
   components/      exercices, UI partagée
   pages/           accueil, test, parcours, leçon, révisions, jeux, Emma, réglages, méthode

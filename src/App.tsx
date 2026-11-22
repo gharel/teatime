@@ -1,19 +1,30 @@
-import { lazy, Suspense, useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef, type ComponentType } from 'react';
 import { useRoute, ToastZone, Confetti, navigate, notify, resolvedTheme, ThemeToggle } from './components/ui';
 import { onSttNotice } from './lib/stt';
 import { dueCards, useAppState, getState } from './lib/store';
 import { tts } from './lib/tts';
+import { autoReload } from './lib/recover';
 import Home from './pages/Home';
 import Icon, { type IconName } from './components/Icon';
 
-const Placement = lazy(() => import('./pages/Placement'));
-const Path = lazy(() => import('./pages/Path'));
-const Lesson = lazy(() => import('./pages/Lesson'));
-const Review = lazy(() => import('./pages/Review'));
-const Arcade = lazy(() => import('./pages/Arcade'));
-const Tutor = lazy(() => import('./pages/Tutor'));
-const Settings = lazy(() => import('./pages/Settings'));
-const Method = lazy(() => import('./pages/Method'));
+/** Page chargée à la demande ; module introuvable (appli mise à jour entre-temps) : rechargement. */
+function page<T extends ComponentType<any>>(load: () => Promise<{ default: T }>) {
+  return lazy(() =>
+    load().catch((err) => {
+      autoReload('page introuvable (mise à jour de l’appli)');
+      throw err;
+    }),
+  );
+}
+
+const Placement = page(() => import('./pages/Placement'));
+const Path = page(() => import('./pages/Path'));
+const Lesson = page(() => import('./pages/Lesson'));
+const Review = page(() => import('./pages/Review'));
+const Arcade = page(() => import('./pages/Arcade'));
+const Tutor = page(() => import('./pages/Tutor'));
+const Settings = page(() => import('./pages/Settings'));
+const Method = page(() => import('./pages/Method'));
 
 const TITLES: Record<string, string> = {
   '': 'Accueil',

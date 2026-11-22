@@ -22,6 +22,8 @@ import {
   setPlaybackAudioSession,
 } from './device';
 import { friendlyLoadError } from './download';
+import { openModelWorker, sharedModelWorker, type ModelWorker } from './modelWorker';
+import { autoReload, lastAutoReload, lastCrash, traceTime } from './recover';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { PIPER_CACHE, PIPER_VOICE } from './piper';
 import { getState } from './store';
@@ -170,7 +172,7 @@ class TtsService {
   private listeners = new Set<Listener>();
   /** Fermetures du micro déjà prises en compte par le contexte audio (iOS). */
   private seenCaptureEnds = 0;
-  private worker: Worker | null = null;
+  private worker: ModelWorker | null = null;
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private playHead = 0;
@@ -195,6 +197,11 @@ class TtsService {
   private systemVoices: SpeechSynthesisVoice[] = [];
   private speakingCount = 0;
   private speechPrimed = false;
+  /** Chargement demandé par l'apprenant (bouton) : pas de rechargement automatique en cas d'échec. */
+  private manualLoad = false;
+  /** Surveillance d'un chargement qui ne progresse plus. */
+  private watched: EngineStatus | null = null;
+  private stallTimer: number | undefined;
 
   constructor() {
     if (typeof window === 'undefined') return;
@@ -253,7 +260,37 @@ class TtsService {
     return () => this.listeners.delete(l);
   }
   private emit() {
+    if (this.neural !== this.watched) {
+      this.watched = this.neural;
+      this.watchStall();
+    }
     this.listeners.forEach((l) => l());
+  }
+
+  /**
+   * Chargement bloqué (aucun progrès pendant 90 s : connexion figée, worker muet) : erreur, puis
+   * rechargement automatique de la page (une fois), qui suffit en général.
+   */
+  private watchStall() {
+    if (typeof window === 'undefined') return;
+    window.clearTimeout(this.stallTimer);
+    if (this.neural.status !== 'loading') return;
+    const st = this.neural;
+    this.stallTimer = window.setTimeout(() => {
+      if (this.neural !== st) return;
+      this.loadFailed('le chargement de la voix ne progresse plus. Touchez « Réessayer »', 'chargement bloqué depuis 90 s');
+    }, 90_000);
+  }
+
+  /** Échec du chargement de la voix : erreur affichée, worker libéré, page rechargée une fois. */
+  private loadFailed(detail: string, why: string) {
+    if (this.neural.status === 'loading' && this.neuralModel) endLoad(this.neuralModel);
+    this.worker?.terminate();
+    this.worker = null;
+    this.neural = { status: 'error', progress: 0, detail };
+    this.note(`voix : ${why.slice(0, 90)}`);
+    this.emit();
+    if (!this.manualLoad && autoReload(`voix : ${why.slice(0, 90)}`)) this.note('rechargement automatique de la page');
   }
 
   get isSpeaking() {
@@ -387,6 +424,7 @@ class TtsService {
    */
   loadNeural({ manual = false }: { manual?: boolean } = {}) {
     if (this.neural.status === 'loading' || this.neural.status === 'ready') return;
+    this.manualLoad = manual;
     this.neural = { status: 'loading', progress: 0, detail: 'Préparation de la voix neuronale…' };
     this.emit();
     void this.pickModel().then(({ model, device }) => {
@@ -426,15 +464,11 @@ class TtsService {
     beginLoad(model, device);
     // Sur GPU la génération est 3 à 5× plus rapide que la parole ; sur CPU elle peut être plus lente.
     this.rtf = model === 'piper' ? 0.5 : device === 'webgpu' ? 0.3 : 1;
-    this.worker = new Worker(new URL('../workers/tts.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = openModelWorker('tts');
     this.worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
     this.worker.onerror = (e) => {
       endLoad(model);
-      this.worker?.terminate();
-      this.worker = null;
-      this.neural = { status: 'error', progress: 0, detail: friendlyLoadError(e.message || 'Erreur du worker') };
-      this.note(`erreur du worker de voix : ${e.message || '?'}`);
-      this.emit();
+      this.loadFailed(friendlyLoadError(e.message || 'Erreur du worker'), `erreur du worker : ${e.message || '?'}`);
     };
     this.worker.postMessage({ type: 'load', engine: model, device });
   }
@@ -496,11 +530,7 @@ class TtsService {
       case 'error':
         endLoad(this.neuralModel ?? 'kokoro');
         // Worker neuf au prochain essai (celui-ci peut être dans un état incohérent).
-        this.worker?.terminate();
-        this.worker = null;
-        this.neural = { status: 'error', progress: 0, detail: friendlyLoadError(msg.error) };
-        this.note(`erreur de chargement de la voix : ${String(msg.error).slice(0, 80)}`);
-        this.emit();
+        this.loadFailed(friendlyLoadError(msg.error), `erreur de chargement : ${String(msg.error)}`);
         break;
       case 'speak-error':
         this.note(`erreur de synthèse : ${String(msg.error).slice(0, 80)}`);
@@ -718,6 +748,8 @@ class TtsService {
           : `voix du système${this.neural.status === 'loading' ? ' (voix neuronale en chargement)' : ''}`;
     const rtf = voice === 'piper' ? this.piperRtf : voice === 'kokoro' ? this.kokoroRtf : null;
     const iso = typeof self !== 'undefined' && self.crossOriginIsolated;
+    const crash = lastCrash();
+    const reload = lastAutoReload();
     return [
       { label: 'Voix utilisée', value: voiceLabel + (rtf !== null ? ` · ${fmtRtf(rtf)} s de calcul par s de voix` : '') },
       { label: 'Contexte audio', value: ctx ? `${ctx.state} · ${ctx.sampleRate} Hz` : 'pas encore créé (touchez « Tester la voix »)' },
@@ -725,6 +757,9 @@ class TtsService {
       { label: 'Micro', value: captureActive() ? 'ouvert' : 'fermé' },
       { label: 'Calcul', value: `${iso ? 'isolé' : 'non isolé'} · ${this.neuralThreads ?? (iso ? '?' : 1)} thread(s)` },
       { label: 'Plateforme', value: `${isIOS() ? 'iOS (WebKit)' : 'autre'} · ${navigator.userAgent.match(/(Brave|CriOS|FxiOS|EdgiOS|Version\/[\d.]+ Mobile|Chrome\/\d+|Firefox\/\d+)/)?.[0] ?? '?'}` },
+      { label: 'Modèles', value: sharedModelWorker() ? 'un seul moteur partagé (économie de mémoire)' : 'un moteur par modèle' },
+      { label: 'Dernier plantage', value: crash ? `${traceTime(crash)} · ${crash.label}` : 'aucun' },
+      { label: 'Rechargement auto', value: reload ? `${traceTime(reload)} · ${reload.label}` : 'aucun' },
     ];
   }
 

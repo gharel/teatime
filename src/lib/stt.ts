@@ -21,6 +21,7 @@ import {
   interruptedLoads,
   releaseMicWhileSpeaking,
 } from './device';
+import { openModelWorker, type ModelWorker } from './modelWorker';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -287,7 +288,7 @@ export function webSpeechText(results: ArrayLike<ArrayLike<{ transcript: string 
 
 class WhisperService {
   status: EngineStatus = { status: 'idle', progress: 0 };
-  private worker: Worker | null = null;
+  private worker: ModelWorker | null = null;
   private listeners = new Set<() => void>();
   private tracker = new ProgressTracker();
   private nextId = 1;
@@ -327,7 +328,7 @@ class WhisperService {
         !!(await (navigator as any).gpu.requestAdapter().catch(() => null));
       beginLoad('whisper', gpu ? 'webgpu' : 'wasm');
       this.worker?.terminate();
-      this.worker = new Worker(new URL('../workers/stt.worker.ts', import.meta.url), { type: 'module' });
+      this.worker = openModelWorker('stt');
       this.worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === 'progress') {
@@ -372,6 +373,18 @@ class WhisperService {
 }
 
 export const whisper = new WhisperService();
+
+/** Le modèle Whisper choisi est-il déjà téléchargé (cache de Transformers.js) ? */
+export async function whisperCached(): Promise<boolean> {
+  try {
+    if (!('caches' in self)) return false;
+    const name = getState().settings.whisperModel.split('/').pop() ?? '';
+    const keys = await (await caches.open('transformers-cache')).keys();
+    return keys.some((k) => k.url.includes(`/${name}/`) && /encoder_model/.test(k.url));
+  } catch {
+    return false;
+  }
+}
 
 /* ------------------------------ Découpage en énoncés (VAD) ------------------------------ */
 

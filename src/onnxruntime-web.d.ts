@@ -13,6 +13,7 @@ declare module 'onnxruntime-web' {
     readonly inputNames: readonly string[];
     readonly outputNames: readonly string[];
     run(feeds: Record<string, Tensor>): Promise<Record<string, Tensor>>;
+    release(): Promise<void>;
   }
   export const InferenceSession: {
     create(

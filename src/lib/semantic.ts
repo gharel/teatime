@@ -4,6 +4,7 @@
  * de la conversation ; chaque réponse de l'apprenant est ensuite comparée
  * à la question posée et aux autres thèmes (≈ 20 ms par phrase).
  * ------------------------------------------------------------------ */
+import { openModelWorker, type ModelWorker } from './modelWorker';
 import { ProgressTracker, type EngineStatus } from './tts';
 
 export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
@@ -14,7 +15,7 @@ export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
 
 class SemanticService {
   status: EngineStatus = { status: 'idle', progress: 0 };
-  private worker: Worker | null = null;
+  private worker: ModelWorker | null = null;
   private listeners = new Set<() => void>();
   private tracker = new ProgressTracker();
   private nextId = 1;
@@ -39,7 +40,7 @@ class SemanticService {
     if (!this.worker && this.status.status !== 'error') {
       this.status = { status: 'loading', progress: 0, detail: 'Préparation de la compréhension…' };
       this.emit();
-      this.worker = new Worker(new URL('../workers/embed.worker.ts', import.meta.url), { type: 'module' });
+      this.worker = openModelWorker('embed');
       this.worker.onmessage = (e) => this.onWorker(e.data);
       this.worker.onerror = (e) => this.fail(e.message || 'Erreur du worker');
       this.worker.postMessage({ type: 'load' });

@@ -11,7 +11,7 @@ import Avatar, { type AvatarMood, type AvatarState } from '../tutor/Avatar';
 import { TutorSession, type Correction } from '../tutor/engine';
 import { looksFrench } from '../tutor/understand';
 import { tts } from '../lib/tts';
-import { ContinuousListener, listen, resolveSttEngine, webSpeechSupported, whisper, type ContinuousState } from '../lib/stt';
+import { ContinuousListener, listen, resolveSttEngine, webSpeechSupported, whisper, whisperCached, type ContinuousState } from '../lib/stt';
 import { llm, WEBLLM_MODELS } from '../lib/llm';
 import { wordDiff } from '../lib/corrector';
 import { pron } from '../lib/pron';
@@ -20,6 +20,8 @@ import { speechScore, splitSentences } from '../lib/text';
 import { interruptedLoads, isIOS } from '../lib/device';
 import { PIPER_VOICE } from '../lib/piper';
 import { semantic } from '../lib/semantic';
+import { sharedModelWorker } from '../lib/modelWorker';
+import { crashOnStartup, setActivity } from '../lib/recover';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
 import Icon, { ICONS, IconBadge, topicIcon } from '../components/Icon';
@@ -183,6 +185,8 @@ function Progress({ value }: { value: number }) {
 
 /* ------------------------------ Page ------------------------------ */
 
+let crashNoticeShown = false;
+
 export default function Tutor() {
   const profileLevel = useAppState((s) => s.profile.level);
   const name = useAppState((s) => s.profile.name);
@@ -208,6 +212,35 @@ export default function Tutor() {
       if (settings.llmProvider === 'scripted') void llm.load();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // iPhone (moteur partagé, un seul thread) : Whisper s'initialise juste après la voix, avant la
+  // conversation ; sinon son initialisation (plusieurs secondes) couperait Emma en pleine phrase.
+  useEffect(() => {
+    if (!sharedModelWorker() || resolveSttEngine() !== 'whisper') return;
+    let started = false;
+    const tryStart = () => {
+      if (started || whisper.status.status !== 'idle') return;
+      const st = tts.neural.status;
+      if (getState().settings.ttsEngine !== 'system' && (st === 'idle' || st === 'loading')) return;
+      started = true;
+      void whisperCached().then((cached) => {
+        if (cached && whisper.status.status === 'idle') void whisper.load();
+      });
+    };
+    tryStart();
+    const un = tts.subscribe(tryStart);
+    return () => {
+      un();
+    };
+  }, []);
+
+  // La page a été tuée pendant la dernière conversation (mémoire saturée, le navigateur l'a rechargée).
+  useEffect(() => {
+    const crash = crashOnStartup();
+    if (crashNoticeShown || !crash?.label.startsWith('conversation') || Date.now() - crash.t > 30 * 60_000) return;
+    crashNoticeShown = true;
+    notify('warn', 'La page s’est rechargée pendant la conversation (mémoire du téléphone saturée ?). Détails : Réglages → Diagnostic audio.', 9000);
   }, []);
 
   useEffect(() => {
@@ -298,39 +331,44 @@ export default function Tutor() {
   );
 }
 
-/** Démarre la conversation… en attendant la voix neuronale si elle est en cours de chargement. */
+/**
+ * Démarre la conversation. Désactivé tant que la voix d'Emma se charge : sinon elle parlerait avec
+ * la voix du système (muette sur iPhone en mode silencieux). Sur iPhone, on attend aussi la fin de
+ * l'initialisation de Whisper (même moteur : elle couperait Emma).
+ */
 function StartButton({ onStart }: { onStart: () => void }) {
   const engine = useAppState((s) => s.settings.ttsEngine);
   const neural = useService(tts, () => ({ ...tts.neural }));
-  const [waiting, setWaiting] = useState(false);
-  const loading = engine !== 'system' && neural.status === 'loading';
+  const stt = useService(whisper, () => ({ ...whisper.status }));
+  const voiceLoading = engine !== 'system' && (neural.status === 'idle' || neural.status === 'loading');
+  const sttLoading = sharedModelWorker() && stt.status === 'loading';
 
-  useEffect(() => {
-    if (waiting && !loading) {
-      setWaiting(false);
-      onStart();
-    }
-  }, [waiting, loading, onStart]);
-
-  if (waiting && loading) {
+  if (voiceLoading || sttLoading) {
+    const progress = voiceLoading ? neural.progress : stt.progress;
+    const pct = progress > 0 && progress < 1 ? ` ${Math.round(progress * 100)} %` : '';
     return (
       <div className="card center" aria-live="polite">
-        <strong>Emma s'échauffe la voix… {Math.round(neural.progress * 100)} %</strong>
-        <Progress value={neural.progress} />
-        <p className="tiny muted" style={{ margin: '8px 0' }}>
-          Premier lancement uniquement : la voix est ensuite gardée en cache sur cet appareil.
-        </p>
-        <button
-          className="btn ghost sm"
-          onClick={() => {
-            setWaiting(false);
-            onStart();
-          }}
-        >
-          {isIOS()
-            ? 'Commencer tout de suite (voix du système : muette si l’iPhone est en mode silencieux)'
-            : 'Commencer tout de suite (voix du système, moins naturelle)'}
+        <button className="btn primary lg block" disabled aria-busy="true">
+          <Icon name="hourglass" /> {voiceLoading ? `Emma s'échauffe la voix…${pct}` : `Préparation de l'écoute…${pct}`}
         </button>
+        <Progress value={progress} />
+        <p className="tiny muted" style={{ margin: '8px 0 0' }}>
+          {voiceLoading
+            ? 'Premier lancement uniquement : la voix est ensuite gardée en cache sur cet appareil.'
+            : 'La reconnaissance vocale (Whisper) s’initialise : quelques secondes.'}
+        </p>
+        {voiceLoading && !isIOS() && (
+          <button
+            className="btn ghost sm"
+            style={{ marginTop: 8 }}
+            onClick={() => {
+              tts.unlockAudio();
+              onStart();
+            }}
+          >
+            Commencer sans attendre (voix du système, moins naturelle)
+          </button>
+        )}
       </div>
     );
   }
@@ -339,8 +377,7 @@ function StartButton({ onStart }: { onStart: () => void }) {
       className="btn primary lg block"
       onClick={() => {
         tts.unlockAudio();
-        if (loading) setWaiting(true);
-        else onStart();
+        onStart();
       }}
     >
       <Icon name="mic" /> Commencer la conversation
@@ -393,6 +430,13 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [turns, interim]);
+
+  // Activité en cours, retrouvée au démarrage suivant si l'onglet est tué (mémoire) en pleine conversation.
+  useEffect(() => {
+    const what = { idle: 'en attente', listening: 'écoute', thinking: 'Emma réfléchit', speaking: 'Emma parle' }[state];
+    setActivity(`conversation (${what}${micState === 'transcribing' ? ', transcription' : ''})`);
+  }, [state, micState]);
+  useEffect(() => () => setActivity(null), []);
 
   /** Lit une suite de phrases en mettant à jour les sous-titres. */
   const speakQueue = useRef<Promise<void>>(Promise.resolve());

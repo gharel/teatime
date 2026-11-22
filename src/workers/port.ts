@@ -1,0 +1,42 @@
+/// <reference lib="webworker" />
+/*
+ * Outils communs aux services de modèles (voix, Whisper, compréhension).
+ *
+ * Chaque service parle à son « port » : le worker lui-même (worker dédié), ou un MessagePort
+ * quand plusieurs services partagent un même worker (iPhone, voir src/lib/modelWorker.ts).
+ */
+import { env } from '@huggingface/transformers';
+
+export interface Port {
+  postMessage(message: unknown, transfer: Transferable[]): void;
+  onmessage: ((e: MessageEvent) => unknown) | null;
+  close?(): void;
+}
+
+/** Threads WASM (seulement possible quand la page est isolée : SharedArrayBuffer). */
+export function setWasmThreads(n: number) {
+  const wasm = env.backends.onnx.wasm as { numThreads?: number } | undefined;
+  if (wasm && self.crossOriginIsolated) wasm.numThreads = Math.max(1, n);
+}
+
+let tail: Promise<unknown> = Promise.resolve();
+
+/**
+ * Calculs des modèles un par un. Dans un worker partagé, la voix, Whisper et la compréhension
+ * se partagent un seul thread : sans cette file, une mesure de vitesse ou une transcription
+ * compterait le temps passé à attendre les autres. Dans un worker dédié, elle ne coûte rien.
+ */
+export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+  const run = tail.then(fn, fn);
+  tail = run.catch(() => undefined);
+  return run;
+}
+
+/** Comme `exclusive`, en renvoyant aussi la durée du calcul (sans l'attente). */
+export function exclusiveTimed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }> {
+  return exclusive(async () => {
+    const t = performance.now();
+    const value = await fn();
+    return { value, ms: performance.now() - t };
+  });
+}

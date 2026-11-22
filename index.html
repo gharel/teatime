@@ -13,10 +13,20 @@
          cross-origin => WASM multi-thread pour la voix et la reconnaissance). Il ne fait rien quand
          l'hébergeur les envoie déjà (serveur de dev, Cloudflare Pages, Netlify). -->
     <script>
+      // iPhone / iPad (WebKit) : l'isolation « credentialless » n'y existe pas, le service worker ne
+      // sert à rien et coûte des rechargements à chaque ouverture (et des échecs de chargement quand
+      // iOS l'arrête en cours de route). On ne l'installe pas, et on retire celui déjà installé.
+      var coiIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
       // Réglage par défaut de la bibliothèque (require-corp sur Chrome/Firefox) : « credentialless »
       // servi par un service worker ne garde pas l'isolation au rechargement dans Chrome.
       window.coi = {
         quiet: true,
+        shouldRegister: function () {
+          return !coiIOS;
+        },
+        shouldDeregister: function () {
+          return coiIOS;
+        },
         // Au plus 2 rechargements par session : si le navigateur ne laisse pas le service worker
         // prendre la main (mobile, réglages de confidentialité), on évite une boucle de rechargements.
         doReload: function () {
@@ -31,7 +41,9 @@
       // Page contrôlée par le service worker mais pas isolée (cas observé au 1er rechargement) :
       // un seul rechargement de rattrapage par session.
       try {
-        if (window.crossOriginIsolated === false && navigator.serviceWorker && navigator.serviceWorker.controller) {
+        if (coiIOS) {
+          // rien : pas d'isolation possible
+        } else if (window.crossOriginIsolated === false && navigator.serviceWorker && navigator.serviceWorker.controller) {
           if (!sessionStorage.getItem('coi-retry')) {
             sessionStorage.setItem('coi-retry', '1');
             location.reload();
