@@ -6,6 +6,7 @@
  * plantait et se rechargeait. Partagé, l'espace libéré par un modèle sert aux calculs des autres.
  * Chaque service arrive par son propre MessagePort (message « connect »).
  */
+import './wasmHeap';
 import { serveTts } from './tts.core';
 import { serveStt } from './stt.core';
 import { serveEmbed } from './embed.core';

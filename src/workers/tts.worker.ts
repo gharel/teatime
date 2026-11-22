@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 /* Synthèse vocale dans son propre worker (voir tts.core.ts). */
+import './wasmHeap';
 import { serveTts } from './tts.core';
 import { setWasmThreads, type Port } from './port';
 

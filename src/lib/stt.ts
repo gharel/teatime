@@ -22,7 +22,7 @@ import {
   releaseMicWhileSpeaking,
 } from './device';
 import { openModelWorker, type ModelWorker } from './modelWorker';
-import { journal } from './journal';
+import { heapNote, journal } from './journal';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -346,7 +346,7 @@ class WhisperService {
           this.emit();
         } else if (m.type === 'ready') {
           if (typeof m.warmMs === 'number') this.noteDuration(m.warmMs);
-          journal(`Whisper prêt (pré-chauffe ${Math.round(m.warmMs ?? 0)} ms)`);
+          journal(`Whisper prêt (pré-chauffe ${Math.round(m.warmMs ?? 0)} ms)${heapNote(m.heap)}`);
           endLoad('whisper');
           this.status = { status: 'ready', progress: 1, detail: 'Whisper prêt (100 % local)' };
           this.readyWaiters.splice(0).forEach((r) => r());
@@ -358,7 +358,9 @@ class WhisperService {
           this.emit();
         } else if (m.type === 'result') {
           if (typeof m.ms === 'number') this.noteDuration(m.ms);
-          journal(`Whisper : ${m.error ? `erreur ${String(m.error).slice(0, 60)}` : `${String(m.text ?? '').length} car. en ${Math.round(m.ms ?? 0)} ms`}`);
+          journal(
+            `Whisper : ${m.error ? `erreur ${String(m.error).slice(0, 60)}` : `${String(m.text ?? '').length} car. en ${Math.round(m.ms ?? 0)} ms`}${heapNote(m.heap)}`,
+          );
           this.waiters.get(m.id)?.(m.text);
           this.waiters.delete(m.id);
         }

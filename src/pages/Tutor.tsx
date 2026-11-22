@@ -22,7 +22,7 @@ import { PIPER_VOICE } from '../lib/piper';
 import { semantic } from '../lib/semantic';
 import { sharedModelWorker } from '../lib/modelWorker';
 import { crashOnStartup, setActivity, traceTime } from '../lib/recover';
-import { journal } from '../lib/journal';
+import { eventsBeforeCrash, journal, journalTime } from '../lib/journal';
 import { CopyDiagnosticsButton } from '../components/Diagnostics';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
@@ -268,7 +268,19 @@ export default function Tutor() {
             À {traceTime(crash)}, pendant « {crash.label} ». Copiez le diagnostic et envoyez-le : il contient le journal des
             dernières secondes avant le plantage.
           </p>
-          <div className="diag-actions">
+          {eventsBeforeCrash().length > 0 && (
+            <>
+              <span className="tiny muted">Dernières secondes avant le plantage :</span>
+              <ol className="diag-journal crash-events">
+                {eventsBeforeCrash().map((e, i) => (
+                  <li key={`${e.t}-${i}`}>
+                    <time>{journalTime(e.t)}</time> {e.e}
+                  </li>
+                ))}
+              </ol>
+            </>
+          )}
+          <div className="diag-actions" style={{ marginTop: 10 }}>
             <CopyDiagnosticsButton />
             <button
               className="btn sm"

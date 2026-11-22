@@ -24,7 +24,7 @@ import {
 import { friendlyLoadError } from './download';
 import { openModelWorker, type ModelWorker } from './modelWorker';
 import { autoReload } from './recover';
-import { journal } from './journal';
+import { heapNote, journal } from './journal';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { PIPER_CACHE, PIPER_VOICE } from './piper';
 import { getState } from './store';
@@ -535,7 +535,7 @@ class TtsService {
           }
           this.neural = { status: 'ready', progress: 1, detail: 'Voix neuronale légère prête' };
         }
-        this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}`);
+        this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}${heapNote(msg.heap)}`);
         this.emit();
         break;
       }
@@ -548,7 +548,7 @@ class TtsService {
         this.note(`erreur de synthèse : ${String(msg.error).slice(0, 80)}`);
         break;
       case 'chunk':
-        this.onChunk(msg.id, msg.audio, msg.sampleRate, msg.phonemes, msg.chars ?? 0, msg.genMs ?? 0);
+        this.onChunk(msg.id, msg.audio, msg.sampleRate, msg.phonemes, msg.chars ?? 0, msg.genMs ?? 0, msg.heap);
         break;
       case 'done': {
         const p = this.pending.get(msg.id);
@@ -564,11 +564,11 @@ class TtsService {
   /** Statistiques de fluidité (diagnostic) : génération vs durée audio, trous entre phrases. */
   stats: { genMs: number; durMs: number; gapMs: number; waitMs: number }[] = [];
 
-  private onChunk(id: number, audio: Float32Array, sampleRate: number, phonemes: string, chars: number, genMs: number) {
+  private onChunk(id: number, audio: Float32Array, sampleRate: number, phonemes: string, chars: number, genMs: number, heap?: number) {
     const p = this.pending.get(id);
     if (!p || !this.audioCtx) return;
     const durMs = (audio.length / sampleRate) * 1000;
-    this.note(`voix : phrase calculée en ${Math.round(genMs)} ms (${(durMs / 1000).toFixed(1).replace('.', ',')} s d’audio)`);
+    this.note(`voix : phrase calculée en ${Math.round(genMs)} ms (${(durMs / 1000).toFixed(1).replace('.', ',')} s d’audio)${heapNote(heap)}`);
     if (durMs > 200) {
       this.rtf = this.rtf * 0.6 + (genMs / durMs) * 0.4;
       if (chars > 0) this.msPerChar = this.msPerChar * 0.7 + (durMs / chars) * 0.3;

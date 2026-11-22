@@ -4,6 +4,7 @@
  * ------------------------------------------------------------------ */
 import type { CSSProperties } from 'react';
 import {
+  Share,
   Copy,
   ArrowRight,
   AudioLines,
@@ -172,6 +173,7 @@ export const ICONS = {
   recap: ClipboardCheck,
   write: PenLine,
   copy: Copy,
+  share: Share,
   download: Download,
   upload: Upload,
   trash: Trash,

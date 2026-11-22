@@ -21,6 +21,7 @@ import {
   type PiperConfig,
 } from '../lib/piper';
 import { exclusive, exclusiveTimed, type Port } from './port';
+import { heapMB } from './wasmHeap';
 
 type Device = 'wasm' | 'webgpu';
 type Engine = 'kokoro' | 'piper';
@@ -245,7 +246,7 @@ export function serveTts(port: Port) {
     } catch {
       /* sans gravité */
     }
-    post({ type: 'ready', engine, device: used, threads: wasmEnv?.numThreads ?? 1, rtf });
+    post({ type: 'ready', engine, device: used, threads: wasmEnv?.numThreads ?? 1, rtf, heap: heapMB() });
   }
 
   async function drain() {
@@ -269,6 +270,7 @@ export function serveTts(port: Port) {
               phonemes: chunk.phonemes,
               chars: chunk.text.length,
               genMs,
+              heap: heapMB(),
             },
             [chunk.audio.buffer],
           );

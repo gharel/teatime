@@ -6,6 +6,7 @@
 import { pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
 import { languagePicker } from './whisperLang';
 import { exclusiveTimed, type Port } from './port';
+import { heapMB } from './wasmHeap';
 
 type Msg =
   | { type: 'load'; model: string; device: 'wasm' | 'webgpu' }
@@ -46,7 +47,7 @@ export function serveStt(port: Port) {
     // Pré-chauffe (compile les shaders / initialise le runtime), chronométrée : sur un appareil lent,
     // l'appli renonce à la transcription en direct.
     const { ms } = await exclusiveTimed(() => asr!(new Float32Array(16000)));
-    post({ type: 'ready', warmMs: ms });
+    post({ type: 'ready', warmMs: ms, heap: heapMB() });
   }
 
   /* Les transcriptions passent une par une (une session ONNX ne supporte pas les appels concurrents). */
@@ -64,7 +65,7 @@ export function serveStt(port: Port) {
           model(job.audio, lang ? ({ decoder_input_ids: lang.prefix, logits_processor: [lang.process] } as object) : undefined),
         );
         const text = Array.isArray(out) ? out.map((o) => o.text).join(' ') : out.text;
-        post({ type: 'result', id: job.id, text: text.trim(), lang: lang?.detected ?? 'en', ms });
+        post({ type: 'result', id: job.id, text: text.trim(), lang: lang?.detected ?? 'en', ms, heap: heapMB() });
       } catch (err) {
         post({ type: 'result', id: job.id, text: '', error: String(err) });
       }

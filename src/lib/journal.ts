@@ -47,6 +47,17 @@ export function journalEntries(): readonly JournalEntry[] {
   return entries;
 }
 
+/** « · mémoire du moteur 512 Mo » (tas WASM du worker de modèles, voir workers/wasmHeap.ts). */
+export function heapNote(mb: unknown): string {
+  return typeof mb === 'number' && mb > 0 ? ` · mémoire du moteur ${mb} Mo` : '';
+}
+
+/** Les n événements qui précèdent le dernier plantage détecté (vide s'il n'y en a pas). */
+export function eventsBeforeCrash(n = 15): JournalEntry[] {
+  const i = entries.map((x) => x.e.startsWith('⚠ PLANTAGE')).lastIndexOf(true);
+  return i < 0 ? [] : entries.slice(Math.max(0, i - n), i);
+}
+
 export function clearJournal() {
   entries = [];
   persist();

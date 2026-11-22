@@ -5,37 +5,53 @@
 import { useEffect, useState } from 'react';
 import { diagnosticSections, diagnosticText, recentCrash, type Tone } from '../lib/diagnostics';
 import { DEBUG_FLAGS, debugFlags, isIOS, setDebugFlag } from '../lib/device';
-import { clearJournal, journalEntries, journalTime, onJournal } from '../lib/journal';
+import { clearJournal, journal, journalEntries, journalTime, onJournal } from '../lib/journal';
 import { traceTime } from '../lib/recover';
 import { say, tts } from '../lib/tts';
 import Icon from './Icon';
 
-/** Copie dans le presse-papiers ; repli execCommand (anciens WebKit). */
-async function copyText(text: string): Promise<boolean> {
+/**
+ * Copie synchrone, pendant le toucher : seule méthode fiable sur iOS (Safari, et surtout les
+ * navigateurs WKWebView comme Brave, où l'API Clipboard échoue ou ne répond jamais).
+ */
+function copyNow(text: string): boolean {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  // 16 px : pas de zoom automatique d'iOS ; hors de l'écran mais sélectionnable.
+  ta.style.cssText = 'position:fixed;top:0;left:-9999px;width:10px;height:10px;font-size:16px;opacity:0;';
+  ta.contentEditable = 'true';
+  ta.readOnly = false;
+  document.body.appendChild(ta);
+  let ok = false;
   try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    /* repli ci-dessous */
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
+    const range = document.createRange();
+    range.selectNodeContents(ta);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
     ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand('copy');
-    ta.remove();
-    return ok;
+    ok = document.execCommand('copy');
+    sel?.removeAllRanges();
   } catch {
-    return false;
+    ok = false;
   }
+  ta.remove();
+  return ok;
 }
 
-/** Bouton « Copier le diagnostic » (avec texte à sélectionner à la main si la copie est refusée). */
+/** API Clipboard, abandonnée si elle ne répond pas (WKWebView). */
+function copyAsync(text: string): Promise<boolean> {
+  if (!navigator.clipboard?.writeText) return Promise.resolve(false);
+  return Promise.race([
+    navigator.clipboard.writeText(text).then(
+      () => true,
+      () => false,
+    ),
+    new Promise<boolean>((r) => window.setTimeout(() => r(false), 1500)),
+  ]);
+}
+
+/** Boutons « Copier le diagnostic » et « Partager », avec le texte à sélectionner en dernier recours. */
 export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { className?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'manual'>('idle');
   const [text, setText] = useState('');
@@ -44,6 +60,7 @@ export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { classN
     const id = window.setTimeout(() => setState('idle'), 2500);
     return () => window.clearTimeout(id);
   }, [state]);
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   return (
     <>
       <button
@@ -51,15 +68,35 @@ export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { classN
         onClick={() => {
           const t = diagnosticText();
           setText(t);
-          void copyText(t).then((ok) => setState(ok ? 'copied' : 'manual'));
+          if (copyNow(t)) {
+            setState('copied');
+            journal('diagnostic copié');
+            return;
+          }
+          void copyAsync(t).then((ok) => {
+            setState(ok ? 'copied' : 'manual');
+            journal(ok ? 'diagnostic copié (API)' : 'copie du diagnostic refusée : texte affiché');
+          });
         }}
       >
         <Icon name={state === 'copied' ? 'check' : 'copy'} size={16} /> {state === 'copied' ? 'Copié !' : 'Copier le diagnostic'}
       </button>
+      {canShare && (
+        <button
+          className="btn sm"
+          onClick={() => {
+            void navigator.share({ title: 'Diagnostic Tea Time English', text: diagnosticText() }).catch(() => undefined);
+          }}
+        >
+          <Icon name="share" size={16} /> Partager
+        </button>
+      )}
       {state === 'manual' && (
         <div className="diag-manual">
-          <span className="tiny muted">Copie automatique refusée : sélectionnez tout le texte ci-dessous puis copiez-le.</span>
-          <textarea className="input diag-text" readOnly value={text} rows={8} onFocus={(e) => e.currentTarget.select()} />
+          <span className="tiny muted">
+            Copie automatique refusée par le navigateur : touchez le texte, « Tout sélectionner », puis « Copier ».
+          </span>
+          <textarea className="input diag-text" readOnly value={text} rows={10} onFocus={(e) => e.currentTarget.select()} />
         </div>
       )}
     </>

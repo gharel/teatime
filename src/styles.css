@@ -2021,6 +2021,7 @@ strong.label-icon,
 .diag-journal li.sep { color: var(--text-soft); margin-top: 4px; }
 .crash-card { border: 1px solid var(--danger); background: var(--danger-soft); margin-bottom: 16px; }
 .crash-card p { margin: 4px 0 10px; }
+.crash-events { max-height: none; margin-bottom: 0; }
 @media (max-width: 480px) {
   .diag-row { grid-template-columns: 1fr; gap: 2px; }
 }

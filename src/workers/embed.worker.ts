@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 /* Plongements de phrases dans leur propre worker (voir embed.core.ts). */
+import './wasmHeap';
 import { serveEmbed } from './embed.core';
 import { setWasmThreads, type Port } from './port';
 
