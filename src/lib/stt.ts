@@ -779,6 +779,7 @@ export class ContinuousListener {
   pause() {
     if (this.paused) return;
     this.paused = true;
+    journal(`écoute en pause${this.rec ? ' (reconnaissance du navigateur arrêtée)' : ''}${this.release ? ', micro refermé' : ''}`);
     this.seg?.reset();
     this.wsText = '';
     this.wsInterim = '';
@@ -954,6 +955,7 @@ export class ContinuousListener {
     const audio = chunks.length ? resampleTo16k(chunks, this.micRate) : undefined;
     if (text) {
       this.ev.onState?.('transcribing');
+      journal(`reconnaissance du navigateur : phrase reconnue (${text.length} car.), arrêt`);
       // Repart sur une reconnaissance neuve pour ne pas recoller l'énoncé suivant
       try {
         this.rec?.abort();
@@ -988,6 +990,7 @@ export class ContinuousListener {
     };
     rec.onerror = (e: any) => {
       if (rec !== this.rec) return;
+      journal(`reconnaissance du navigateur : erreur « ${e.error ?? '?'} »`);
       if (e.error === 'network' || e.error === 'service-not-allowed' || e.error === 'language-not-supported') {
         // Service en ligne injoignable : bascule définitive sur Whisper, micro toujours ouvert.
         this.rec = null;
@@ -1008,6 +1011,7 @@ export class ContinuousListener {
     // Chrome arrête la reconnaissance après un moment : on la relance tant que le micro est actif.
     rec.onend = () => {
       if (rec !== this.rec) return;
+      journal('reconnaissance du navigateur : terminée');
       // Android arrête la reconnaissance après chaque phrase : on garde ce qui a été dit avant de relancer.
       this.wsText = mergeTranscript(this.wsText, this.wsInterim);
       this.wsInterim = '';
@@ -1015,6 +1019,7 @@ export class ContinuousListener {
     };
     try {
       rec.start();
+      journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
     } catch {
       /* déjà démarrée */
     }

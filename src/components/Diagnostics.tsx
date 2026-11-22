@@ -2,7 +2,7 @@
  * Panneau « Diagnostic audio » : état en direct, incidents, options de
  * dépannage (iPhone) et journal, avec un bouton pour tout copier.
  * ------------------------------------------------------------------ */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { diagnosticSections, diagnosticText, recentCrash, type Tone } from '../lib/diagnostics';
 import { DEBUG_FLAGS, debugFlags, isIOS, setDebugFlag } from '../lib/device';
 import { clearJournal, journal, journalEntries, journalTime, onJournal } from '../lib/journal';
@@ -55,6 +55,8 @@ function copyAsync(text: string): Promise<boolean> {
 export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { className?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'manual'>('idle');
   const [text, setText] = useState('');
+  const [selHint, setSelHint] = useState('');
+  const ta = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (state !== 'copied') return;
     const id = window.setTimeout(() => setState('idle'), 2500);
@@ -93,10 +95,32 @@ export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { classN
       )}
       {state === 'manual' && (
         <div className="diag-manual">
-          <span className="tiny muted">
-            Copie automatique refusée par le navigateur : touchez le texte, « Tout sélectionner », puis « Copier ».
-          </span>
-          <textarea className="input diag-text" readOnly value={text} rows={10} onFocus={(e) => e.currentTarget.select()} />
+          <span className="tiny muted">Copie automatique refusée par le navigateur : sélectionnez le texte puis copiez-le.</span>
+          <div className="diag-actions">
+            <button
+              className="btn primary sm"
+              onClick={() => {
+                const el = ta.current;
+                if (!el) return;
+                // Texte visible, sélectionné pendant le toucher : la copie y a le plus de chances de passer.
+                el.focus({ preventScroll: true });
+                el.setSelectionRange(0, el.value.length);
+                el.select();
+                let ok = false;
+                try {
+                  ok = document.execCommand('copy');
+                } catch {
+                  ok = false;
+                }
+                journal(ok ? 'diagnostic copié (texte sélectionné)' : 'diagnostic sélectionné, copie à faire à la main');
+                setSelHint(ok ? 'Copié !' : 'Tout est sélectionné : touchez le texte puis « Copier » dans la bulle.');
+              }}
+            >
+              <Icon name="copy" size={16} /> Tout sélectionner
+            </button>
+          </div>
+          {selHint && <span className="small">{selHint}</span>}
+          <textarea ref={ta} className="input diag-text" readOnly value={text} rows={10} />
         </div>
       )}
     </>
