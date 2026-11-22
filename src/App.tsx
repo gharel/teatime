@@ -111,8 +111,8 @@ export default function App() {
     const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
     const idle = (cb: () => void) => (w.requestIdleCallback ? w.requestIdleCallback(cb, { timeout: 4000 }) : w.setTimeout(cb, 1500));
     idle(() => {
-      if (getState().settings.ttsEngine !== 'kokoro' || tts.kokoro.status !== 'idle') return;
-      void tts.kokoroCached().then((cached) => cached && tts.loadKokoro());
+      if (getState().settings.ttsEngine === 'system' || tts.neural.status !== 'idle') return;
+      void tts.neuralCached().then((cached) => cached && tts.loadNeural());
     });
   }, []);
 

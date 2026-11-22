@@ -1,13 +1,38 @@
 /* ------------------------------------------------------------------
  * Synthèse vocale unifiée :
- *  - Kokoro-82M (neuronale, locale, dans un Web Worker) — voix naturelle,
- *    phonèmes fournis => synchro labiale précise + enveloppe audio réelle.
+ *  - Voix neuronale locale (Web Worker), jouée par Web Audio — phonèmes
+ *    fournis => synchro labiale précise + enveloppe audio réelle :
+ *      · Kokoro-82M, très naturelle, si l'appareil la calcule assez vite ;
+ *      · Piper, légère, sinon (téléphones) ;
  *  - Repli : speechSynthesis du système (instantané, sans téléchargement).
+ *    Sur iPhone elle est muette en mode silencieux et se bat avec le micro :
+ *    on ne s'en sert qu'en dernier recours.
  * ------------------------------------------------------------------ */
-import { beginLoad, constrainedDevice, endLoad, interruptedLoads, isIOS, setPlaybackAudioSession } from './device';
+import {
+  audioSessionType,
+  beginLoad,
+  captureActive,
+  captureEndCount,
+  constrainedDevice,
+  endLoad,
+  interruptedLoads,
+  isIOS,
+  msSinceCaptureEnd,
+  releaseMicWhileSpeaking,
+  setPlaybackAudioSession,
+} from './device';
 import { friendlyLoadError } from './download';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
+import { PIPER_CACHE, PIPER_VOICE } from './piper';
 import { getState } from './store';
+
+export type NeuralModel = 'kokoro' | 'piper';
+
+/**
+ * Après la fermeture du micro, iOS garde encore quelques centaines de millisecondes la
+ * session d'appel (« play-and-record ») : une voix lancée trop tôt part dans l'écouteur.
+ */
+const AFTER_CAPTURE_MS = 450;
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
 
@@ -83,9 +108,17 @@ interface Staged {
 function slowRtf(): number {
   return constrainedDevice() ? 1.5 : 2.5;
 }
+/**
+ * Piper n'est abandonnée (pour la voix du système) que si elle est vraiment très lente : sur
+ * iPhone la voix du système est muette en mode silencieux, mieux vaut un peu d'attente.
+ */
+function piperMaxRtf(): number {
+  return slowRtf() * 2;
+}
 const SPEED_KEY = 'teatime:kokoro-speed';
 
-function readSpeed(): Partial<Record<'wasm' | 'webgpu', number>> {
+/** Vitesses mesurées : Kokoro par appareil de calcul (« wasm », « webgpu ») et « piper ». */
+function readSpeed(): Partial<Record<'wasm' | 'webgpu' | 'piper', number>> {
   try {
     return JSON.parse(localStorage.getItem(SPEED_KEY) || '{}') ?? {};
   } catch {
@@ -93,16 +126,29 @@ function readSpeed(): Partial<Record<'wasm' | 'webgpu', number>> {
   }
 }
 
-function writeSpeed(device: 'wasm' | 'webgpu', rtf: number) {
+function writeSpeed(key: 'wasm' | 'webgpu' | 'piper', rtf: number) {
   try {
-    localStorage.setItem(SPEED_KEY, JSON.stringify({ ...readSpeed(), [device]: Math.round(rtf * 100) / 100 }));
+    localStorage.setItem(SPEED_KEY, JSON.stringify({ ...readSpeed(), [key]: Math.round(rtf * 100) / 100 }));
   } catch {
     /* navigation privée */
   }
 }
 
+function fmtRtf(rtf: number): string {
+  return rtf.toFixed(1).replace('.', ',');
+}
+
 function slowDetail(rtf: number): string {
-  return `Voix neuronale trop lente sur cet appareil (${rtf.toFixed(1).replace('.', ',')} s de calcul par seconde de voix) : voix du système, instantanée`;
+  return `Voix neuronale trop lente sur cet appareil (${fmtRtf(rtf)} s de calcul par seconde de voix) : voix du système, instantanée`;
+}
+
+/**
+ * Kokoro sur le processeur d'un téléphone sans multi-thread (page non isolée : iPhone, iPad)
+ * se calcule 2 à 3× plus lentement qu'elle ne se parle : inutile de télécharger ses 90 Mo pour
+ * le constater, la voix légère est choisie d'emblée.
+ */
+function kokoroPredictedSlow(device: 'wasm' | 'webgpu'): boolean {
+  return device === 'wasm' && constrainedDevice() && typeof self !== 'undefined' && !self.crossOriginIsolated;
 }
 
 export async function webgpuAvailable(): Promise<boolean> {
@@ -115,8 +161,15 @@ export async function webgpuAvailable(): Promise<boolean> {
 }
 
 class TtsService {
-  kokoro: EngineStatus = { status: 'idle', progress: 0 };
+  /** Voix neuronale (Kokoro ou Piper selon l'appareil). */
+  neural: EngineStatus = { status: 'idle', progress: 0 };
+  /** Modèle chargé (ou en cours de chargement) dans le worker. */
+  neuralModel: NeuralModel | null = null;
+  /** Journal des derniers événements audio (diagnostic affiché dans les réglages). */
+  log: string[] = [];
   private listeners = new Set<Listener>();
+  /** Fermetures du micro déjà prises en compte par le contexte audio (iOS). */
+  private seenCaptureEnds = 0;
   private worker: Worker | null = null;
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
@@ -132,8 +185,12 @@ class TtsService {
   private flushTimer: number | undefined;
   /** Appareil réellement utilisé par Kokoro (après détection / repli). */
   kokoroDevice: 'wasm' | 'webgpu' | null = null;
-  /** Vitesse mesurée de la voix neuronale (temps de calcul / durée de la voix), si connue. */
+  /** Vitesse mesurée de Kokoro (temps de calcul / durée de la voix), si connue. */
   kokoroRtf: number | null = null;
+  /** Vitesse mesurée de Piper, si connue. */
+  piperRtf: number | null = null;
+  /** Threads de calcul du worker de voix. */
+  neuralThreads: number | null = null;
   private tracker = new ProgressTracker();
   private systemVoices: SpeechSynthesisVoice[] = [];
   private speakingCount = 0;
@@ -168,6 +225,9 @@ class TtsService {
    */
   private primeSystemSpeech() {
     if (this.speechPrimed || !isIOS() || !('speechSynthesis' in window)) return;
+    // Pas d'amorçage si Emma parle par Web Audio : sur iOS 27, une phrase de la voix du système
+    // (même muette) interrompt la session audio de la page (bug WebKit 218815).
+    if (this.currentVoice() !== 'system') return;
     this.speechPrimed = true;
     try {
       const u = new SpeechSynthesisUtterance(' ');
@@ -176,6 +236,16 @@ class TtsService {
     } catch {
       /* sans gravité */
     }
+  }
+
+  /** Note un événement audio (diagnostic). */
+  note(event: string) {
+    const t = new Date();
+    const hh = `${t.getHours()}`.padStart(2, '0');
+    const mm = `${t.getMinutes()}`.padStart(2, '0');
+    const ss = `${t.getSeconds()}`.padStart(2, '0');
+    this.log.push(`${hh}:${mm}:${ss} ${event}`);
+    if (this.log.length > 12) this.log.shift();
   }
 
   subscribe(l: Listener) {
@@ -190,14 +260,22 @@ class TtsService {
     return this.speakingCount > 0;
   }
 
-  /** La voix neuronale se calcule plus lentement qu'elle ne se parle sur cet appareil. */
+  /** Kokoro se calcule plus lentement qu'elle ne se parle sur cet appareil. */
   get kokoroTooSlow(): boolean {
     return this.kokoroRtf !== null && this.kokoroRtf > slowRtf();
   }
 
   /** La voix neuronale est chargée et assez rapide (ou gardée malgré sa lenteur). */
-  kokoroUsable(): boolean {
-    return this.kokoro.status === 'ready' && !!this.worker && (!this.kokoroTooSlow || getState().settings.kokoroEvenIfSlow);
+  neuralUsable(): boolean {
+    if (this.neural.status !== 'ready' || !this.worker) return false;
+    if (this.neuralModel === 'piper') return true;
+    return !this.kokoroTooSlow || getState().settings.kokoroEvenIfSlow;
+  }
+
+  /** Voix qu'Emma utilisera pour la prochaine phrase. */
+  currentVoice(): 'kokoro' | 'piper' | 'system' {
+    if (getState().settings.ttsEngine !== 'system' && this.neuralUsable()) return this.neuralModel ?? 'system';
+    return 'system';
   }
 
   voices(): SpeechSynthesisVoice[] {
@@ -245,16 +323,29 @@ class TtsService {
         return null;
       }
     }
+    const ctx = this.audioCtx;
     // « suspended » (autoplay) ou « interrupted » (iOS : micro ouvert, appel, Siri…).
-    if (this.audioCtx.state !== 'running') void this.audioCtx.resume().catch(() => undefined);
-    return this.audioCtx;
+    if (ctx.state !== 'running') {
+      void ctx.resume().catch(() => undefined);
+    } else if (isIOS() && this.seenCaptureEnds !== captureEndCount() && !captureActive()) {
+      // iOS : un contexte qui jouait pendant que le micro était ouvert garde parfois la sortie
+      // « appel » (écouteur du haut, volume faible) après sa fermeture ; une suspension suivie
+      // d'une reprise le recale sur le haut-parleur (bug WebKit 218012).
+      this.seenCaptureEnds = captureEndCount();
+      void ctx
+        .suspend()
+        .then(() => ctx.resume())
+        .catch(() => undefined);
+    }
+    return ctx;
   }
 
-  /** La voix neuronale a-t-elle déjà été téléchargée (Cache Storage de Transformers.js) ? */
-  async kokoroCached(): Promise<boolean> {
+  /** La voix neuronale qui serait chargée ici a-t-elle déjà été téléchargée (Cache Storage) ? */
+  async neuralCached(): Promise<boolean> {
     try {
       if (!('caches' in self)) return false;
-      const device = await this.resolveDevice();
+      const { model, device } = await this.pickModel();
+      if (model === 'piper') return !!(await (await caches.open(PIPER_CACHE)).match(PIPER_VOICE.model));
       const file = device === 'webgpu' ? /onnx\/model\.onnx/ : /onnx\/model_quantized\.onnx/;
       const c = await caches.open('transformers-cache');
       const keys = await c.keys();
@@ -262,6 +353,20 @@ class TtsService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Modèle à charger : Kokoro si l'appareil la calcule assez vite (mesure gardée, ou prédiction
+   * pour les téléphones sans multi-thread), sinon Piper. Réglage « piper » : Piper d'office.
+   */
+  async pickModel(): Promise<{ model: NeuralModel; device: 'wasm' | 'webgpu' }> {
+    const s = getState().settings;
+    if (s.ttsEngine === 'piper') return { model: 'piper', device: 'wasm' };
+    const device = await this.resolveDevice();
+    if (s.kokoroEvenIfSlow) return { model: 'kokoro', device };
+    const known = readSpeed()[device];
+    const slow = known !== undefined ? known > slowRtf() : kokoroPredictedSlow(device);
+    return slow ? { model: 'piper', device: 'wasm' } : { model: 'kokoro', device };
   }
 
   /** Appareil à utiliser pour Kokoro selon le réglage, l'appareil et les plantages précédents. */
@@ -277,50 +382,61 @@ class TtsService {
   }
 
   /**
-   * Lance (une seule fois) le téléchargement/chargement de Kokoro. Les chargements automatiques
-   * s'arrêtent après deux interruptions (plantage probable) ; `manual` force un nouvel essai.
+   * Lance (une seule fois) le téléchargement/chargement de la voix neuronale. Les chargements
+   * automatiques s'arrêtent après deux interruptions (plantage probable) ; `manual` force un essai.
    */
-  loadKokoro({ manual = false }: { manual?: boolean } = {}) {
-    if (this.kokoro.status === 'loading' || this.kokoro.status === 'ready') return;
-    if (!manual && interruptedLoads('kokoro').count >= 2) {
-      this.kokoro = {
-        status: 'error',
-        progress: 0,
-        detail: 'le chargement de la voix a été interrompu plusieurs fois (mémoire insuffisante ?). Touchez « Réessayer »',
-      };
-      this.emit();
-      return;
-    }
-    this.kokoro = { status: 'loading', progress: 0, detail: 'Téléchargement de la voix neuronale…' };
+  loadNeural({ manual = false }: { manual?: boolean } = {}) {
+    if (this.neural.status === 'loading' || this.neural.status === 'ready') return;
+    this.neural = { status: 'loading', progress: 0, detail: 'Préparation de la voix neuronale…' };
     this.emit();
-    void this.resolveDevice().then((device) => {
-      // Déjà mesurée trop lente ici : inutile de la charger (mémoire et processeur épargnés).
-      const known = readSpeed()[device];
-      if (!manual && !getState().settings.kokoroEvenIfSlow && known !== undefined && known > slowRtf()) {
-        this.kokoroRtf = known;
-        this.kokoroDevice = device;
-        this.kokoro = { status: 'unsupported', progress: 0, detail: slowDetail(known) };
+    void this.pickModel().then(({ model, device }) => {
+      if (!manual && interruptedLoads(model).count >= 2) {
+        this.neural = {
+          status: 'error',
+          progress: 0,
+          detail: 'le chargement de la voix a été interrompu plusieurs fois (mémoire insuffisante ?). Touchez « Réessayer »',
+        };
         this.emit();
         return;
       }
-      beginLoad('kokoro', device);
-      this.startWorker(device);
+      if (model === 'piper') {
+        const known = readSpeed()[device];
+        if (known !== undefined && known > slowRtf()) this.kokoroRtf = known;
+      }
+      this.startWorker(model, device);
     });
   }
 
-  private startWorker(device: 'wasm' | 'webgpu') {
+  /** Recharge la voix neuronale (changement de réglage : Kokoro, Piper…). */
+  reloadNeural() {
+    this.stop();
+    this.worker?.terminate();
+    this.worker = null;
+    if (this.neural.status === 'loading' && this.neuralModel) endLoad(this.neuralModel);
+    this.neuralModel = null;
+    this.neural = { status: 'idle', progress: 0 };
+    this.emit();
+    if (getState().settings.ttsEngine !== 'system') this.loadNeural({ manual: true });
+  }
+
+  private startWorker(model: NeuralModel, device: 'wasm' | 'webgpu') {
+    this.worker?.terminate();
+    this.neuralModel = model;
+    this.tracker = new ProgressTracker();
+    beginLoad(model, device);
     // Sur GPU la génération est 3 à 5× plus rapide que la parole ; sur CPU elle peut être plus lente.
-    this.rtf = device === 'webgpu' ? 0.3 : 1;
+    this.rtf = model === 'piper' ? 0.5 : device === 'webgpu' ? 0.3 : 1;
     this.worker = new Worker(new URL('../workers/tts.worker.ts', import.meta.url), { type: 'module' });
     this.worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
     this.worker.onerror = (e) => {
-      endLoad('kokoro');
+      endLoad(model);
       this.worker?.terminate();
       this.worker = null;
-      this.kokoro = { status: 'error', progress: 0, detail: friendlyLoadError(e.message || 'Erreur du worker') };
+      this.neural = { status: 'error', progress: 0, detail: friendlyLoadError(e.message || 'Erreur du worker') };
+      this.note(`erreur du worker de voix : ${e.message || '?'}`);
       this.emit();
     };
-    this.worker.postMessage({ type: 'load', device });
+    this.worker.postMessage({ type: 'load', engine: model, device });
   }
 
   private onWorker(msg: any) {
@@ -328,38 +444,66 @@ class TtsService {
       case 'progress': {
         const p = this.tracker.update(msg.p ?? {});
         const mb = this.tracker.totalMB();
-        this.kokoro =
+        const name = this.neuralModel === 'piper' ? 'Voix neuronale légère' : 'Voix neuronale';
+        this.neural =
           mb < 5
-            ? { status: 'loading', progress: 0, detail: 'Préparation de la voix neuronale…' }
-            : { status: 'loading', progress: p, detail: p >= 0.999 ? 'Initialisation de la voix…' : `Voix neuronale : ${Math.round(p * 100)} % (${mb.toFixed(0)} Mo)` };
+            ? { status: 'loading', progress: 0, detail: `Préparation de la ${name.toLowerCase()}…` }
+            : { status: 'loading', progress: p, detail: p >= 0.999 ? 'Initialisation de la voix…' : `${name} : ${Math.round(p * 100)} % (${mb.toFixed(0)} Mo)` };
         this.emit();
         break;
       }
-      case 'ready':
-        endLoad('kokoro');
-        this.kokoroDevice = msg.device ?? null;
-        if (typeof msg.rtf === 'number' && Number.isFinite(msg.rtf)) {
-          this.kokoroRtf = msg.rtf;
-          this.rtf = msg.rtf;
-          if (this.kokoroDevice) writeSpeed(this.kokoroDevice, msg.rtf);
-        }
-        if (this.kokoroTooSlow && !getState().settings.kokoroEvenIfSlow) {
-          // Trop lente pour converser : on libère sa mémoire, la voix du système prend le relais.
-          this.worker?.terminate();
-          this.worker = null;
-          this.kokoro = { status: 'unsupported', progress: 0, detail: slowDetail(this.kokoroRtf!) };
+      case 'ready': {
+        const model: NeuralModel = msg.engine === 'piper' ? 'piper' : 'kokoro';
+        endLoad(model);
+        this.neuralThreads = typeof msg.threads === 'number' ? msg.threads : null;
+        const rtf = typeof msg.rtf === 'number' && Number.isFinite(msg.rtf) ? (msg.rtf as number) : null;
+        if (rtf !== null) this.rtf = rtf;
+        const s = getState().settings;
+        if (model === 'kokoro') {
+          this.kokoroDevice = msg.device ?? null;
+          if (rtf !== null) {
+            this.kokoroRtf = rtf;
+            if (this.kokoroDevice) writeSpeed(this.kokoroDevice, rtf);
+          }
+          if (this.kokoroTooSlow && !s.kokoroEvenIfSlow) {
+            // Trop lente pour converser : on libère sa mémoire, la voix légère prend le relais.
+            this.note(`Kokoro trop lente (${fmtRtf(this.kokoroRtf!)}) : voix légère Piper`);
+            this.neural = { status: 'loading', progress: 0, detail: 'Kokoro est trop lente ici : préparation de la voix légère…' };
+            this.startWorker('piper', 'wasm');
+            this.emit();
+            return;
+          }
+          this.neural = { status: 'ready', progress: 1, detail: msg.device === 'webgpu' ? 'Voix neuronale prête (GPU)' : 'Voix neuronale prête (processeur)' };
         } else {
-          this.kokoro = { status: 'ready', progress: 1, detail: msg.device === 'webgpu' ? 'Voix neuronale prête (GPU)' : 'Voix neuronale prête (processeur)' };
+          if (rtf !== null) {
+            this.piperRtf = rtf;
+            writeSpeed('piper', rtf);
+          }
+          if (rtf !== null && rtf > piperMaxRtf() && s.ttsEngine !== 'piper') {
+            this.worker?.terminate();
+            this.worker = null;
+            this.neural = { status: 'unsupported', progress: 0, detail: slowDetail(rtf) };
+            this.note(`Piper trop lente (${fmtRtf(rtf)}) : voix du système`);
+            this.emit();
+            return;
+          }
+          this.neural = { status: 'ready', progress: 1, detail: 'Voix neuronale légère prête' };
         }
+        this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}`);
         this.emit();
         break;
+      }
       case 'error':
-        endLoad('kokoro');
+        endLoad(this.neuralModel ?? 'kokoro');
         // Worker neuf au prochain essai (celui-ci peut être dans un état incohérent).
         this.worker?.terminate();
         this.worker = null;
-        this.kokoro = { status: 'error', progress: 0, detail: friendlyLoadError(msg.error) };
+        this.neural = { status: 'error', progress: 0, detail: friendlyLoadError(msg.error) };
+        this.note(`erreur de chargement de la voix : ${String(msg.error).slice(0, 80)}`);
         this.emit();
+        break;
+      case 'speak-error':
+        this.note(`erreur de synthèse : ${String(msg.error).slice(0, 80)}`);
         break;
       case 'chunk':
         this.onChunk(msg.id, msg.audio, msg.sampleRate, msg.phonemes, msg.chars ?? 0, msg.genMs ?? 0);
@@ -434,7 +578,16 @@ class TtsService {
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.analyser);
-    const startAt = Math.max(ctx.currentTime + 0.03, this.playHead);
+    // iPhone : micro tout juste refermé, on laisse iOS revenir sur le haut-parleur.
+    const afterCapture = releaseMicWhileSpeaking() ? Math.max(0, AFTER_CAPTURE_MS - msSinceCaptureEnd()) / 1000 : 0;
+    const startAt = Math.max(ctx.currentTime + 0.03, ctx.currentTime + afterCapture, this.playHead);
+    if (!p.sources.length) {
+      this.note(
+        `voix ${this.neuralModel ?? '?'} : phrase de ${(buf.duration).toFixed(1).replace('.', ',')} s, contexte ${ctx.state}, sortie ${ctx.sampleRate} Hz${
+          captureActive() ? ', micro ouvert' : ''
+        }`,
+      );
+    }
     // Trou audible : la phrase précédente était finie avant que celle-ci soit prête.
     const queuedBehind = p.sources.length > 0 || p.requestedAt < this.playHead;
     const gapMs = queuedBehind && startAt > this.playHead + 0.035 ? (startAt - this.playHead) * 1000 : 0;
@@ -471,10 +624,10 @@ class TtsService {
     const clean = cleanForSpeech(text);
     if (!clean) return Promise.resolve();
     const s = getState().settings;
-    const useKokoro = s.ttsEngine === 'kokoro' && this.kokoroUsable() && !!this.unlockAudio();
+    const useNeural = s.ttsEngine !== 'system' && this.neuralUsable() && !!this.unlockAudio();
     this.speakingCount++;
     this.emit();
-    if (useKokoro) {
+    if (useNeural) {
       const id = this.nextId++;
       return new Promise<void>((resolve) => {
         this.pending.set(id, {
@@ -496,8 +649,14 @@ class TtsService {
     });
   }
 
-  private speakSystem(text: string, rate: number): Promise<void> {
-    if (!('speechSynthesis' in window)) return Promise.resolve();
+  private async speakSystem(text: string, rate: number): Promise<void> {
+    if (!('speechSynthesis' in window)) {
+      this.note('voix du système absente de ce navigateur');
+      return;
+    }
+    // iPhone : micro tout juste refermé, on laisse iOS quitter la session d'appel.
+    const wait = releaseMicWhileSpeaking() ? AFTER_CAPTURE_MS - msSinceCaptureEnd() : 0;
+    if (wait > 0) await new Promise((r) => window.setTimeout(r, wait));
     setPlaybackAudioSession();
     return new Promise<void>((resolve) => {
       const u = new SpeechSynthesisUtterance(text);
@@ -513,8 +672,14 @@ class TtsService {
         resolve();
       };
       const est = estimateSpeechMs(text, rate);
-      let guard = window.setTimeout(finish, est * 2.5 + 3000);
+      let started = false;
+      let guard = window.setTimeout(() => {
+        if (!started) this.note('voix du système : aucun son (lecture jamais démarrée)');
+        finish();
+      }, est * 2.5 + 3000);
       u.onstart = () => {
+        started = true;
+        this.note(`voix du système : lecture (${u.voice?.name ?? u.lang})${captureActive() ? ', micro ouvert' : ''}`);
         lipsync.setAnalyser(null);
         lipsync.clear();
         lipsync.schedule(textToVisemes(text), performance.now(), est, 0);
@@ -532,12 +697,35 @@ class TtsService {
         window.clearTimeout(guard);
         finish();
       };
-      u.onerror = () => {
+      u.onerror = (e) => {
+        this.note(`voix du système : erreur « ${(e as SpeechSynthesisErrorEvent).error ?? '?'} »`);
         window.clearTimeout(guard);
         finish();
       };
       speechSynthesis.speak(u);
     });
+  }
+
+  /** État audio lisible (réglages → diagnostic). */
+  diagnostics(): { label: string; value: string }[] {
+    const ctx = this.audioCtx;
+    const voice = this.currentVoice();
+    const voiceLabel =
+      voice === 'kokoro'
+        ? `Kokoro (${this.kokoroDevice === 'webgpu' ? 'GPU' : 'processeur'})`
+        : voice === 'piper'
+          ? 'Piper (voix légère)'
+          : `voix du système${this.neural.status === 'loading' ? ' (voix neuronale en chargement)' : ''}`;
+    const rtf = voice === 'piper' ? this.piperRtf : voice === 'kokoro' ? this.kokoroRtf : null;
+    const iso = typeof self !== 'undefined' && self.crossOriginIsolated;
+    return [
+      { label: 'Voix utilisée', value: voiceLabel + (rtf !== null ? ` · ${fmtRtf(rtf)} s de calcul par s de voix` : '') },
+      { label: 'Contexte audio', value: ctx ? `${ctx.state} · ${ctx.sampleRate} Hz` : 'pas encore créé (touchez « Tester la voix »)' },
+      { label: 'Session audio iOS', value: audioSessionType() ?? 'API absente' },
+      { label: 'Micro', value: captureActive() ? 'ouvert' : 'fermé' },
+      { label: 'Calcul', value: `${iso ? 'isolé' : 'non isolé'} · ${this.neuralThreads ?? (iso ? '?' : 1)} thread(s)` },
+      { label: 'Plateforme', value: `${isIOS() ? 'iOS (WebKit)' : 'autre'} · ${navigator.userAgent.match(/(Brave|CriOS|FxiOS|EdgiOS|Version\/[\d.]+ Mobile|Chrome\/\d+|Firefox\/\d+)/)?.[0] ?? '?'}` },
+    ];
   }
 
   /** Coupe immédiatement la parole et vide la file. */

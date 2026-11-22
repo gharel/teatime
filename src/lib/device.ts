@@ -36,13 +36,29 @@ export function isIOS(): boolean {
  */
 
 let activeCaptures = 0;
+/** Fermetures du micro (toutes captures confondues) et instant de la dernière. */
+let captureEpoch = 0;
+let lastCaptureEnd = -Infinity;
+
+function audioSession(): { type: string } | undefined {
+  return (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+}
 
 function setAudioSessionType(type: 'playback' | 'play-and-record') {
   try {
-    const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
+    const session = audioSession();
     if (session && session.type !== type) session.type = type;
   } catch {
     /* API absente ou refusée */
+  }
+}
+
+/** Catégorie audio iOS actuelle (diagnostic), ou null sans l'API. */
+export function audioSessionType(): string | null {
+  try {
+    return audioSession()?.type ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -60,7 +76,36 @@ export function beginCaptureAudioSession() {
 /** Micro refermé. */
 export function endCaptureAudioSession() {
   activeCaptures = Math.max(0, activeCaptures - 1);
-  if (activeCaptures === 0) setAudioSessionType('playback');
+  if (activeCaptures === 0) {
+    setAudioSessionType('playback');
+    captureEpoch++;
+    lastCaptureEnd = performance.now();
+  }
+}
+
+/** Le micro est-il ouvert en ce moment (au sens de la session audio) ? */
+export function captureActive(): boolean {
+  return activeCaptures > 0;
+}
+
+/** Compteur de fermetures du micro : change à chaque fois que la dernière capture se termine. */
+export function captureEndCount(): number {
+  return captureEpoch;
+}
+
+/** Millisecondes écoulées depuis la fermeture du micro (Infinity s'il n'a jamais été ouvert). */
+export function msSinceCaptureEnd(): number {
+  return performance.now() - lastCaptureEnd;
+}
+
+/**
+ * iPhone / iPad : tant que le micro est ouvert, iOS garde la session audio en « play-and-record »
+ * (catégorie d'appel) — la voix d'Emma part dans l'écouteur du haut, à très bas volume, ou est
+ * coupée ; la voix du système interrompt même la capture (iOS 27, bug WebKit 218815). On referme
+ * donc réellement le micro pendant qu'Emma parle, et on le rouvre ensuite.
+ */
+export function releaseMicWhileSpeaking(): boolean {
+  return isIOS();
 }
 
 /** Appareil à mémoire limitée : on y évite le GPU pour les modèles et les chargements superflus. */
@@ -72,7 +117,7 @@ export function constrainedDevice(): boolean {
 
 /* ------------------------------ Garde de chargement ------------------------------ */
 
-export type GuardedEngine = 'kokoro' | 'whisper' | 'webllm' | 'pron';
+export type GuardedEngine = 'kokoro' | 'piper' | 'whisper' | 'webllm' | 'pron';
 
 interface GuardEntry {
   device?: string;

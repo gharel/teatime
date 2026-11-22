@@ -12,7 +12,15 @@
  *  - ContinuousListener     : micro ouvert en permanence (conversation avec
  *                             Emma), découpage automatique en énoncés.
  * ------------------------------------------------------------------ */
-import { beginCaptureAudioSession, beginLoad, constrainedDevice, endCaptureAudioSession, endLoad, interruptedLoads } from './device';
+import {
+  beginCaptureAudioSession,
+  beginLoad,
+  constrainedDevice,
+  endCaptureAudioSession,
+  endLoad,
+  interruptedLoads,
+  releaseMicWhileSpeaking,
+} from './device';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -369,6 +377,8 @@ export const whisper = new WhisperService();
 
 interface SegmenterOptions {
   sampleRate: number;
+  /** Bruit de fond déjà estimé (micro rouvert : on repart de la mesure précédente). */
+  noise?: number;
   silenceMs: () => number;
   onSpeechStart: () => void;
   /** Audio de l'énoncé en cours, appelé régulièrement (transcription en direct). */
@@ -394,7 +404,14 @@ class Segmenter {
   private lastPartial = 0;
   /** Nombre de blocs jusqu'au dernier bloc où l'on entendait la voix. */
   private voicedUpTo = 0;
-  constructor(private o: SegmenterOptions) {}
+  constructor(private o: SegmenterOptions) {
+    if (o.noise !== undefined && Number.isFinite(o.noise)) this.noise = o.noise;
+  }
+
+  /** Bruit de fond estimé (RMS). */
+  get noiseLevel(): number {
+    return this.noise;
+  }
 
   reset() {
     this.speaking = false;
@@ -687,10 +704,20 @@ export interface ContinuousEvents {
 /**
  * Micro ouvert en permanence : chaque énoncé (fin détectée après un silence réglable)
  * est transcrit puis remis via onFinal. pause()/resume() pendant qu'Emma parle,
- * pour ne pas transcrire sa propre voix.
+ * pour ne pas transcrire sa propre voix. Sur iPhone, pause() referme réellement le
+ * micro (sinon iOS étouffe ou coupe la voix d'Emma) et resume() le rouvre.
  */
 export class ContinuousListener {
   private mic: MicCapture | null = null;
+  /** Ouverture du micro en cours. */
+  private micOpening: Promise<void> | null = null;
+  /** Génération du micro : toute fermeture invalide une ouverture en cours. */
+  private micGen = 0;
+  /** Micro refermé pendant les pauses (iPhone). */
+  private readonly release = releaseMicWhileSpeaking();
+  /** Moteur de reconnaissance prêt (Whisper chargé) : le micro peut s'ouvrir. */
+  private ready = false;
+  private noise: number | undefined;
   private seg: Segmenter | null = null;
   private rec: SR = null;
   private recTimer: number | undefined;
@@ -739,6 +766,7 @@ export class ContinuousListener {
     } catch {
       /* ignore */
     }
+    if (this.release) this.closeMic();
     this.ev.onLevel?.(0);
     if (this.running) this.ev.onState?.('paused');
   }
@@ -748,7 +776,69 @@ export class ContinuousListener {
     this.paused = false;
     if (!this.running) return;
     if (this.engine === 'webspeech') this.restartRec();
+    if (this.release && this.ready && !this.mic) {
+      // iPhone : le micro a été refermé pendant qu'Emma parlait ; « Je vous écoute » une fois rouvert.
+      this.ev.onState?.('loading', 'ouverture du micro');
+      this.ensureMic()
+        .then(() => {
+          if (this.running && !this.paused) this.ev.onState?.('listening');
+        })
+        .catch((err) => {
+          this.stop();
+          this.ev.onError?.(micErrorMessage(err));
+        });
+      return;
+    }
     this.ev.onState?.('listening');
+  }
+
+  /** Ouvre le micro s'il doit l'être (moteur prêt, pas en pause sur iPhone) et ne l'est pas déjà. */
+  private ensureMic(): Promise<void> {
+    if (this.micOpening) return this.micOpening;
+    if (!this.running || !this.ready || this.mic || (this.paused && this.release)) return Promise.resolve();
+    const gen = ++this.micGen;
+    const mic = new MicCapture();
+    const whisperMode = this.engine === 'whisper';
+    const opening = mic
+      .start((pcm, rms) => {
+        if (this.mic !== mic || !this.running || this.paused) return;
+        this.ev.onLevel?.(Math.min(1, rms * 12));
+        if (whisperMode) {
+          this.seg?.push(pcm, rms);
+        } else {
+          const now = performance.now();
+          this.ring.push({ t: now, pcm });
+          while (this.ring.length && now - this.ring[0].t > 30000) this.ring.shift();
+        }
+      })
+      .then(() => {
+        // Refermé (pause, arrêt) pendant l'ouverture : on relâche aussitôt.
+        if (gen !== this.micGen || !this.running || (this.paused && this.release)) {
+          mic.stop();
+          return;
+        }
+        this.mic = mic;
+        if (whisperMode) this.seg = this.createSegmenter(mic);
+        else this.micRate = mic.sampleRate;
+      })
+      .catch((err) => {
+        mic.stop();
+        throw err;
+      })
+      .finally(() => {
+        if (this.micOpening === opening) this.micOpening = null;
+      });
+    this.micOpening = opening;
+    return opening;
+  }
+
+  private closeMic() {
+    this.micGen++;
+    this.micOpening = null;
+    if (this.seg) this.noise = this.seg.noiseLevel;
+    this.mic?.stop();
+    this.mic = null;
+    this.seg = null;
   }
 
   /** L'apprenant indique qu'il a fini sa phrase. */
@@ -759,6 +849,7 @@ export class ContinuousListener {
 
   stop() {
     this.running = false;
+    this.ready = false;
     window.clearInterval(this.recTimer);
     try {
       this.rec?.abort();
@@ -766,9 +857,7 @@ export class ContinuousListener {
       /* ignore */
     }
     this.rec = null;
-    this.mic?.stop();
-    this.mic = null;
-    this.seg = null;
+    this.closeMic();
     this.ev.onLevel?.(0);
     this.ev.onState?.('stopped');
   }
@@ -785,15 +874,15 @@ export class ContinuousListener {
       if (st.status !== 'ready') throw new Error(st.detail || 'Whisper indisponible');
     }
     if (!this.running) return;
-    const mic = new MicCapture();
-    this.mic = mic;
-    await mic.start((pcm, rms) => {
-      if (!this.running || this.paused) return;
-      this.ev.onLevel?.(Math.min(1, rms * 12));
-      this.seg?.push(pcm, rms);
-    });
-    this.seg = new Segmenter({
+    this.ready = true;
+    await this.ensureMic();
+    this.ev.onState?.(this.paused ? 'paused' : 'listening');
+  }
+
+  private createSegmenter(mic: MicCapture): Segmenter {
+    return new Segmenter({
       sampleRate: mic.sampleRate,
+      noise: this.noise,
       silenceMs: () => getState().settings.silenceMs,
       onSpeechStart: () => this.ev.onState?.('hearing'),
       onPartial: (chunks) => {
@@ -816,23 +905,15 @@ export class ContinuousListener {
         });
       },
     });
-    this.ev.onState?.(this.paused ? 'paused' : 'listening');
   }
 
   /* ---------- Web Speech ---------- */
 
   private async startWebSpeech() {
     // Micro « niveau » permanent (affiche que l'on est bien écouté)
-    const mic = new MicCapture();
-    this.mic = mic;
-    await mic.start((pcm, rms) => {
-      if (!this.running || this.paused) return;
-      this.ev.onLevel?.(Math.min(1, rms * 12));
-      const now = performance.now();
-      this.ring.push({ t: now, pcm });
-      while (this.ring.length && now - this.ring[0].t > 30000) this.ring.shift();
-    });
-    this.micRate = mic.sampleRate;
+    this.ready = true;
+    await this.ensureMic();
+    if (!this.running) return;
     this.recTimer = window.setInterval(() => {
       if (this.paused || !this.running) return;
       const text = mergeTranscript(this.wsText, this.wsInterim);
@@ -889,8 +970,8 @@ export class ContinuousListener {
         // Service en ligne injoignable : bascule définitive sur Whisper, micro toujours ouvert.
         this.rec = null;
         window.clearInterval(this.recTimer);
-        this.mic?.stop();
-        this.mic = null;
+        this.closeMic();
+        this.ready = false;
         fallbackToWhisper();
         this.engine = 'whisper';
         void this.startWhisper().catch((err) => {

@@ -7,7 +7,7 @@ import type { Level, Skill } from '../types';
 import { constrainedDevice } from './device';
 import { hashString, seeded } from './text';
 
-export type TtsEngine = 'kokoro' | 'system';
+export type TtsEngine = 'kokoro' | 'piper' | 'system';
 export type SttEngine = 'webspeech' | 'whisper';
 export type LlmProvider = 'webllm' | 'ollama' | 'chrome' | 'scripted';
 

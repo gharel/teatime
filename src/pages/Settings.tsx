@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { exportData, importData, resetAll, updateSettings, useAppState, setName, type Settings as S } from '../lib/store';
 import { say, tts } from '../lib/tts';
 import { listen, webSpeechSupported } from '../lib/stt';
@@ -6,6 +6,8 @@ import { WEBLLM_MODELS, llm } from '../lib/llm';
 import { navigate, notify, useService } from '../components/ui';
 import { EnginePanel } from './Tutor';
 import Icon, { ICONS, IconBadge } from '../components/Icon';
+import { isIOS } from '../lib/device';
+import { PIPER_VOICE } from '../lib/piper';
 
 const KOKORO_VOICES: { id: string; label: string }[] = [
   { id: 'af_heart', label: 'Heart — américaine, chaleureuse (recommandée)' },
@@ -77,12 +79,33 @@ export default function Settings() {
       <div className="card stack">
         <label className="field">
           Moteur
-          <select className="input" value={s.ttsEngine} onChange={(e) => set({ ttsEngine: e.target.value as S['ttsEngine'] })}>
-            <option value="kokoro">Voix neuronale Kokoro-82M — très naturelle, locale (téléchargée une fois)</option>
-            <option value="system">Voix du système — instantanée, qualité variable</option>
+          <select
+            className="input"
+            value={s.ttsEngine}
+            onChange={(e) => {
+              const engine = e.target.value as S['ttsEngine'];
+              const before = s.ttsEngine;
+              set({ ttsEngine: engine });
+              // Kokoro <-> Piper : le worker de voix doit charger l'autre modèle.
+              if (engine !== 'system' && before !== 'system' && tts.neural.status !== 'idle') tts.reloadNeural();
+            }}
+          >
+            <option value="kokoro">Voix neuronale automatique — Kokoro (très naturelle) ou Piper si l'appareil est lent</option>
+            <option value="piper">Voix neuronale légère Piper — rapide même sur téléphone (≈ {PIPER_VOICE.mb} Mo)</option>
+            <option value="system">Voix du système — instantanée, qualité variable{isIOS() ? ' (muette en mode silencieux)' : ''}</option>
           </select>
+          {isIOS() && s.ttsEngine === 'system' && (
+            <span className="hint" style={{ color: 'var(--danger)' }}>
+              Sur iPhone et iPad, la voix du système est coupée quand le bouton latéral est en mode silencieux, et peut se
+              taire pendant que le micro est ouvert. Les voix neuronales passent par le lecteur audio : elles restent audibles.
+            </span>
+          )}
         </label>
-        {s.ttsEngine === 'kokoro' ? (
+        {s.ttsEngine === 'piper' ? (
+          <p className="small muted" style={{ margin: 0 }}>
+            Voix : {PIPER_VOICE.label} · modèle Piper « {PIPER_VOICE.id} », calculé sur votre appareil.
+          </p>
+        ) : s.ttsEngine === 'kokoro' ? (
           <>
             <label className="field">
               Voix neuronale
@@ -122,10 +145,17 @@ export default function Settings() {
           <input type="range" min={0.7} max={1.2} step={0.05} value={s.speechRate} onChange={(e) => set({ speechRate: Number(e.target.value) })} />
         </label>
         <div>
-          <button className="btn sm" onClick={() => void say("Hello! I'm Emma, your English teacher. Shall we practise together?")}>
+          <button
+            className="btn sm"
+            onClick={() => {
+              tts.unlockAudio();
+              void say("Hello! I'm Emma, your English teacher. Shall we practise together?");
+            }}
+          >
             <Icon name="speaker" size={16} /> Tester la voix
           </button>
         </div>
+        <AudioDiagnostics />
       </div>
 
       <h2 className="section-title">
@@ -271,5 +301,42 @@ export default function Settings() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** État audio en direct : à capturer et envoyer si Emma reste muette. */
+function AudioDiagnostics() {
+  const [open, setOpen] = useState(false);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setInterval(() => tick((n) => n + 1), 500);
+    return () => window.clearInterval(id);
+  }, [open]);
+  return (
+    <details onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="small">Diagnostic audio (si Emma reste muette)</summary>
+      {open && (
+        <div className="tiny" style={{ marginTop: 6 }}>
+          {tts.diagnostics().map((d) => (
+            <div key={d.label}>
+              <strong>{d.label} :</strong> {d.value}
+            </div>
+          ))}
+          <div style={{ marginTop: 6 }}>
+            <strong>Derniers événements :</strong>
+            {tts.log.length ? (
+              <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+                {tts.log.map((l, i) => (
+                  <li key={i}>{l}</li>
+                ))}
+              </ul>
+            ) : (
+              <span> aucun pour l’instant (touchez « Tester la voix »)</span>
+            )}
+          </div>
+        </div>
+      )}
+    </details>
   );
 }

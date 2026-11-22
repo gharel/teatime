@@ -17,7 +17,8 @@ import { wordDiff } from '../lib/corrector';
 import { pron } from '../lib/pron';
 import type { PronIssue, PronResult, WordAssessment } from '../lib/pronunciation';
 import { speechScore, splitSentences } from '../lib/text';
-import { interruptedLoads } from '../lib/device';
+import { interruptedLoads, isIOS } from '../lib/device';
+import { PIPER_VOICE } from '../lib/piper';
 import { semantic } from '../lib/semantic';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
@@ -38,7 +39,7 @@ let turnId = 1;
 
 export function EnginePanel({ compact = false }: { compact?: boolean }) {
   const settings = useAppState((s) => s.settings);
-  const kokoro = useService(tts, () => ({ ...tts.kokoro }));
+  const neural = useService(tts, () => ({ ...tts.neural, model: tts.neuralModel }));
   const llmStatus = useService(llm, () => ({ ...llm.status }));
   const whisperStatus = useService(whisper, () => ({ ...whisper.status }));
   const understanding = useService(semantic, () => ({ ...semantic.status }));
@@ -56,45 +57,61 @@ export function EnginePanel({ compact = false }: { compact?: boolean }) {
         </h3>
       )}
       <div className="engine-row">
-        <span className={`status-dot ${settings.ttsEngine === 'system' || kokoro.status === 'unsupported' ? 'ready' : kokoro.status}`} />
+        <span className={`status-dot ${settings.ttsEngine === 'system' || neural.status === 'unsupported' ? 'ready' : neural.status}`} />
         <div style={{ flex: 1 }}>
           <strong className="small">Voix d'Emma</strong>
           <div className="tiny muted">
             {settings.ttsEngine === 'system'
               ? 'Voix du système'
-              : kokoro.status === 'ready'
-                ? tts.kokoroTooSlow
-                  ? 'Voix neuronale Kokoro, lente sur cet appareil : Emma répond avec plusieurs secondes de retard'
-                  : `Voix neuronale Kokoro (locale, ${tts.kokoroDevice === 'webgpu' ? 'GPU' : 'processeur'}), prête`
-                : kokoro.status === 'loading'
-                  ? kokoro.detail
-                  : kokoro.status === 'unsupported'
-                    ? kokoro.detail
-                    : kokoro.status === 'error'
-                      ? `Erreur : ${kokoro.detail} — voix du système utilisée`
-                      : 'Voix neuronale Kokoro (≈ 320 Mo sur GPU, 90 Mo sur processeur, une seule fois)'}
+              : neural.status === 'ready'
+                ? neural.model === 'piper'
+                  ? `Voix neuronale légère Piper (locale, rapide)${settings.ttsEngine === 'kokoro' ? ' : Kokoro serait trop lente sur cet appareil' : ''}`
+                  : tts.kokoroTooSlow
+                    ? 'Voix neuronale Kokoro, lente sur cet appareil : Emma répond avec plusieurs secondes de retard'
+                    : `Voix neuronale Kokoro (locale, ${tts.kokoroDevice === 'webgpu' ? 'GPU' : 'processeur'}), prête`
+                : neural.status === 'loading'
+                  ? neural.detail
+                  : neural.status === 'unsupported'
+                    ? neural.detail
+                    : neural.status === 'error'
+                      ? `Erreur : ${neural.detail} — voix du système utilisée`
+                      : settings.ttsEngine === 'piper'
+                        ? `Voix neuronale légère Piper (≈ ${PIPER_VOICE.mb} Mo, une seule fois)`
+                        : `Voix neuronale : Kokoro (≈ 90 à 320 Mo) ou, sur appareil lent, Piper (≈ ${PIPER_VOICE.mb} Mo) — une seule fois`}
           </div>
-          {kokoro.status === 'loading' && <Progress value={kokoro.progress} />}
+          {neural.status === 'loading' && <Progress value={neural.progress} />}
+          {isIOS() && tts.currentVoice() === 'system' && neural.status !== 'loading' && (
+            <div className="tiny" style={{ color: 'var(--danger)', marginTop: 4 }}>
+              Sur iPhone, la voix du système est muette en mode silencieux : basculez le bouton latéral, ou utilisez la voix
+              neuronale (audible même en silencieux).
+            </div>
+          )}
         </div>
-        {settings.ttsEngine === 'kokoro' && (kokoro.status === 'idle' || kokoro.status === 'error') && (
-          <button className="btn sm" onClick={() => tts.loadKokoro({ manual: true })}>
-            {kokoro.status === 'error' ? 'Réessayer' : 'Télécharger'}
+        {settings.ttsEngine !== 'system' && (neural.status === 'idle' || neural.status === 'error') && (
+          <button className="btn sm" onClick={() => tts.loadNeural({ manual: true })}>
+            {neural.status === 'error' ? 'Réessayer' : 'Télécharger'}
           </button>
         )}
-        {settings.ttsEngine === 'kokoro' && kokoro.status === 'unsupported' && (
+        {settings.ttsEngine === 'kokoro' && neural.status === 'ready' && neural.model === 'piper' && !isIOS() && (
           <button
             className="btn sm"
             onClick={() => {
               updateSettings({ kokoroEvenIfSlow: true });
-              tts.loadKokoro({ manual: true });
+              tts.reloadNeural();
             }}
           >
-            Essayer quand même
+            Kokoro quand même
           </button>
         )}
-        {settings.ttsEngine === 'kokoro' && kokoro.status === 'ready' && tts.kokoroTooSlow && (
-          <button className="btn sm" onClick={() => updateSettings({ kokoroEvenIfSlow: false })}>
-            Voix du système
+        {settings.ttsEngine === 'kokoro' && neural.status === 'ready' && neural.model === 'kokoro' && tts.kokoroTooSlow && (
+          <button
+            className="btn sm"
+            onClick={() => {
+              updateSettings({ kokoroEvenIfSlow: false });
+              tts.reloadNeural();
+            }}
+          >
+            Voix légère
           </button>
         )}
       </div>
@@ -178,7 +195,7 @@ export default function Tutor() {
   useEffect(() => {
     void (async () => {
       // La voix neuronale est l'essentiel de l'expérience : on la prépare dès l'arrivée sur la page.
-      if (settings.ttsEngine === 'kokoro' && tts.kokoro.status === 'idle') tts.loadKokoro();
+      if (settings.ttsEngine !== 'system' && tts.neural.status === 'idle') tts.loadNeural();
       // Un chargement du LLM déjà interrompu (onglet planté faute de mémoire ?) : pas de relance
       // automatique, sinon la page replanterait à chaque visite. Le bouton « Charger » reste disponible.
       if (
@@ -284,9 +301,9 @@ export default function Tutor() {
 /** Démarre la conversation… en attendant la voix neuronale si elle est en cours de chargement. */
 function StartButton({ onStart }: { onStart: () => void }) {
   const engine = useAppState((s) => s.settings.ttsEngine);
-  const kokoro = useService(tts, () => ({ ...tts.kokoro }));
+  const neural = useService(tts, () => ({ ...tts.neural }));
   const [waiting, setWaiting] = useState(false);
-  const loading = engine === 'kokoro' && kokoro.status === 'loading';
+  const loading = engine !== 'system' && neural.status === 'loading';
 
   useEffect(() => {
     if (waiting && !loading) {
@@ -298,8 +315,8 @@ function StartButton({ onStart }: { onStart: () => void }) {
   if (waiting && loading) {
     return (
       <div className="card center" aria-live="polite">
-        <strong>Emma s'échauffe la voix… {Math.round(kokoro.progress * 100)} %</strong>
-        <Progress value={kokoro.progress} />
+        <strong>Emma s'échauffe la voix… {Math.round(neural.progress * 100)} %</strong>
+        <Progress value={neural.progress} />
         <p className="tiny muted" style={{ margin: '8px 0' }}>
           Premier lancement uniquement : la voix est ensuite gardée en cache sur cet appareil.
         </p>
@@ -310,7 +327,9 @@ function StartButton({ onStart }: { onStart: () => void }) {
             onStart();
           }}
         >
-          Commencer tout de suite (voix du système, moins naturelle)
+          {isIOS()
+            ? 'Commencer tout de suite (voix du système : muette si l’iPhone est en mode silencieux)'
+            : 'Commencer tout de suite (voix du système, moins naturelle)'}
         </button>
       </div>
     );
