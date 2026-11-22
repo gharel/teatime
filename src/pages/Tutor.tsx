@@ -21,7 +21,9 @@ import { interruptedLoads, isIOS } from '../lib/device';
 import { PIPER_VOICE } from '../lib/piper';
 import { semantic } from '../lib/semantic';
 import { sharedModelWorker } from '../lib/modelWorker';
-import { crashOnStartup, setActivity } from '../lib/recover';
+import { crashOnStartup, setActivity, traceTime } from '../lib/recover';
+import { journal } from '../lib/journal';
+import { CopyDiagnosticsButton } from '../components/Diagnostics';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
 import Icon, { ICONS, IconBadge, topicIcon } from '../components/Icon';
@@ -185,7 +187,7 @@ function Progress({ value }: { value: number }) {
 
 /* ------------------------------ Page ------------------------------ */
 
-let crashNoticeShown = false;
+let crashNoticeDismissed = false;
 
 export default function Tutor() {
   const profileLevel = useAppState((s) => s.profile.level);
@@ -235,13 +237,11 @@ export default function Tutor() {
     };
   }, []);
 
-  // La page a été tuée pendant la dernière conversation (mémoire saturée, le navigateur l'a rechargée).
-  useEffect(() => {
-    const crash = crashOnStartup();
-    if (crashNoticeShown || !crash?.label.startsWith('conversation') || Date.now() - crash.t > 30 * 60_000) return;
-    crashNoticeShown = true;
-    notify('warn', 'La page s’est rechargée pendant la conversation (mémoire du téléphone saturée ?). Détails : Réglages → Diagnostic audio.', 9000);
-  }, []);
+  // La page a été tuée pendant la dernière conversation (le navigateur l'a rechargée).
+  const [crash, setCrash] = useState(() => {
+    const c = crashOnStartup();
+    return c?.label.startsWith('conversation') && Date.now() - c.t < 30 * 60_000 && !crashNoticeDismissed ? c : null;
+  });
 
   useEffect(() => {
     // Changement de moteur : on (re)vérifie le statut
@@ -259,6 +259,42 @@ export default function Tutor() {
         </h1>
         <p>Votre prof d'anglais vocale : elle vous pose des questions, vous répondez à voix haute, elle vous corrige avec bienveillance.</p>
       </div>
+      {crash && (
+        <div className="card crash-card" role="alert">
+          <strong className="label-icon">
+            <Icon name="warn" /> La page s’est rechargée pendant la dernière conversation
+          </strong>
+          <p className="small">
+            À {traceTime(crash)}, pendant « {crash.label} ». Copiez le diagnostic et envoyez-le : il contient le journal des
+            dernières secondes avant le plantage.
+          </p>
+          <div className="diag-actions">
+            <CopyDiagnosticsButton />
+            <button
+              className="btn sm"
+              onClick={() => {
+                try {
+                  sessionStorage.setItem('teatime:open-diag', '1');
+                } catch {
+                  /* navigation privée */
+                }
+                navigate('/reglages');
+              }}
+            >
+              Voir le diagnostic
+            </button>
+            <button
+              className="btn ghost sm"
+              onClick={() => {
+                crashNoticeDismissed = true;
+                setCrash(null);
+              }}
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
       <div className="tutor-layout">
         <div className="card tutor-stage">
           <div className="avatar-wrap">
@@ -436,6 +472,9 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     const what = { idle: 'en attente', listening: 'écoute', thinking: 'Emma réfléchit', speaking: 'Emma parle' }[state];
     setActivity(`conversation (${what}${micState === 'transcribing' ? ', transcription' : ''})`);
   }, [state, micState]);
+  useEffect(() => {
+    journal(`conversation : ${{ idle: 'en attente', listening: 'écoute', thinking: 'Emma réfléchit', speaking: 'Emma parle' }[state]}`);
+  }, [state]);
   useEffect(() => () => setActivity(null), []);
 
   /** Lit une suite de phrases en mettant à jour les sous-titres. */

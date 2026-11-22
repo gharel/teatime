@@ -8,6 +8,9 @@ import { EnginePanel } from './Tutor';
 import Icon, { ICONS, IconBadge } from '../components/Icon';
 import { isIOS } from '../lib/device';
 import { PIPER_VOICE } from '../lib/piper';
+import { DiagnosticsPanel } from '../components/Diagnostics';
+import { recentCrash } from '../lib/diagnostics';
+import { traceTime } from '../lib/recover';
 
 const KOKORO_VOICES: { id: string; label: string }[] = [
   { id: 'af_heart', label: 'Heart — américaine, chaleureuse (recommandée)' },
@@ -306,37 +309,30 @@ export default function Settings() {
 
 /** État audio en direct : à capturer et envoyer si Emma reste muette. */
 function AudioDiagnostics() {
-  const [open, setOpen] = useState(false);
-  const [, tick] = useState(0);
+  const crash = recentCrash();
+  const ref = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(() => {
+    // Ouvert d'office après un plantage, ou quand on arrive du bouton « Voir le diagnostic ».
+    let asked = false;
+    try {
+      asked = sessionStorage.getItem('teatime:open-diag') === '1';
+      sessionStorage.removeItem('teatime:open-diag');
+    } catch {
+      /* navigation privée */
+    }
+    return asked || !!crash;
+  });
   useEffect(() => {
-    if (!open) return;
-    const id = window.setInterval(() => tick((n) => n + 1), 500);
-    return () => window.clearInterval(id);
-  }, [open]);
+    if (open) ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
-    <details onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="small">Diagnostic audio (si Emma reste muette)</summary>
-      {open && (
-        <div className="tiny" style={{ marginTop: 6 }}>
-          {tts.diagnostics().map((d) => (
-            <div key={d.label}>
-              <strong>{d.label} :</strong> {d.value}
-            </div>
-          ))}
-          <div style={{ marginTop: 6 }}>
-            <strong>Derniers événements :</strong>
-            {tts.log.length ? (
-              <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
-                {tts.log.map((l, i) => (
-                  <li key={i}>{l}</li>
-                ))}
-              </ul>
-            ) : (
-              <span> aucun pour l’instant (touchez « Tester la voix »)</span>
-            )}
-          </div>
-        </div>
-      )}
+    <details ref={ref} id="diagnostic" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary className="small">
+        <strong>Diagnostic audio</strong> (si Emma reste muette ou si la page se recharge)
+        {crash && <span className="chip accent" style={{ marginLeft: 6 }}>plantage à {traceTime(crash)}</span>}
+      </summary>
+      {open && <DiagnosticsPanel />}
     </details>
   );
 }

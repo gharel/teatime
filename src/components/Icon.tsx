@@ -4,6 +4,7 @@
  * ------------------------------------------------------------------ */
 import type { CSSProperties } from 'react';
 import {
+  Copy,
   ArrowRight,
   AudioLines,
   Award,
@@ -170,6 +171,7 @@ export const ICONS = {
   profile: UserRound,
   recap: ClipboardCheck,
   write: PenLine,
+  copy: Copy,
   download: Download,
   upload: Upload,
   trash: Trash,

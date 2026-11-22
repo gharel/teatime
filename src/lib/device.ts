@@ -9,6 +9,65 @@
  * n'est jamais arrivé au bout, et on change de stratégie.
  * ------------------------------------------------------------------ */
 
+import { journal } from './journal';
+
+/* ------------------------------ Options de dépannage ------------------------------
+ * Interrupteurs du diagnostic audio (Réglages), pour isoler sur l'appareil ce qui fait
+ * planter ou taire l'audio sans nouvelle version de l'appli.
+ */
+
+export type DebugFlag = 'keepMicOpen' | 'noAudioSession' | 'noContextRelaunch' | 'separateSfx';
+
+export const DEBUG_FLAGS: { id: DebugFlag; label: string; hint: string }[] = [
+  {
+    id: 'keepMicOpen',
+    label: 'Garder le micro ouvert pendant qu’Emma parle',
+    hint: 'iPhone : par défaut le micro se referme pendant qu’elle parle, puis se rouvre.',
+  },
+  {
+    id: 'noAudioSession',
+    label: 'Ne pas changer la session audio iOS',
+    hint: 'Par défaut : « playback » pour la voix, « play-and-record » pour le micro.',
+  },
+  {
+    id: 'noContextRelaunch',
+    label: 'Ne pas relancer le lecteur audio après le micro',
+    hint: 'Par défaut : pause puis reprise du lecteur à chaque fermeture du micro (sortie haut-parleur).',
+  },
+  {
+    id: 'separateSfx',
+    label: 'Effets sonores sur un lecteur séparé',
+    hint: 'Comportement d’avant : un deuxième lecteur audio, créé à la première réponse.',
+  },
+];
+
+const DEBUG_KEY = 'teatime:debug';
+
+export function debugFlags(): Partial<Record<DebugFlag, boolean>> {
+  try {
+    return JSON.parse(localStorage.getItem(DEBUG_KEY) || '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export function debugFlag(flag: DebugFlag): boolean {
+  return !!debugFlags()[flag];
+}
+
+export function setDebugFlag(flag: DebugFlag, on: boolean) {
+  const f = debugFlags();
+  if (on) f[flag] = true;
+  else delete f[flag];
+  try {
+    if (Object.keys(f).length) localStorage.setItem(DEBUG_KEY, JSON.stringify(f));
+    else localStorage.removeItem(DEBUG_KEY);
+  } catch {
+    /* navigation privée */
+  }
+  journal(`option de dépannage « ${flag} » ${on ? 'activée' : 'désactivée'}`);
+}
+
 /** Téléphone ou tablette (y compris iPadOS, qui se présente comme un Mac). */
 export function isMobileDevice(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -47,9 +106,16 @@ function audioSession(): { type: string } | undefined {
 function setAudioSessionType(type: 'playback' | 'play-and-record') {
   try {
     const session = audioSession();
-    if (session && session.type !== type) session.type = type;
-  } catch {
-    /* API absente ou refusée */
+    if (!session || session.type === type) return;
+    if (debugFlag('noAudioSession')) {
+      journal(`session audio iOS laissée à « ${session.type} » (option de dépannage)`);
+      return;
+    }
+    const before = session.type;
+    session.type = type;
+    journal(`session audio iOS : ${before} → ${session.type}`);
+  } catch (err) {
+    journal(`session audio iOS : erreur ${String(err).slice(0, 60)}`);
   }
 }
 
@@ -105,7 +171,7 @@ export function msSinceCaptureEnd(): number {
  * donc réellement le micro pendant qu'Emma parle, et on le rouvre ensuite.
  */
 export function releaseMicWhileSpeaking(): boolean {
-  return isIOS();
+  return isIOS() && !debugFlag('keepMicOpen');
 }
 
 /** Appareil à mémoire limitée : on y évite le GPU pour les modèles et les chargements superflus. */

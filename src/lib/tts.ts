@@ -9,11 +9,11 @@
  *    on ne s'en sert qu'en dernier recours.
  * ------------------------------------------------------------------ */
 import {
-  audioSessionType,
   beginLoad,
   captureActive,
   captureEndCount,
   constrainedDevice,
+  debugFlag,
   endLoad,
   interruptedLoads,
   isIOS,
@@ -22,8 +22,9 @@ import {
   setPlaybackAudioSession,
 } from './device';
 import { friendlyLoadError } from './download';
-import { openModelWorker, sharedModelWorker, type ModelWorker } from './modelWorker';
-import { autoReload, lastAutoReload, lastCrash, traceTime } from './recover';
+import { openModelWorker, type ModelWorker } from './modelWorker';
+import { autoReload } from './recover';
+import { journal } from './journal';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { PIPER_CACHE, PIPER_VOICE } from './piper';
 import { getState } from './store';
@@ -167,8 +168,6 @@ class TtsService {
   neural: EngineStatus = { status: 'idle', progress: 0 };
   /** Modèle chargé (ou en cours de chargement) dans le worker. */
   neuralModel: NeuralModel | null = null;
-  /** Journal des derniers événements audio (diagnostic affiché dans les réglages). */
-  log: string[] = [];
   private listeners = new Set<Listener>();
   /** Fermetures du micro déjà prises en compte par le contexte audio (iOS). */
   private seenCaptureEnds = 0;
@@ -199,6 +198,8 @@ class TtsService {
   private speechPrimed = false;
   /** Chargement demandé par l'apprenant (bouton) : pas de rechargement automatique en cas d'échec. */
   private manualLoad = false;
+  /** Pause puis reprise du lecteur en cours (iOS, après fermeture du micro). */
+  private relaunching = false;
   /** Surveillance d'un chargement qui ne progresse plus. */
   private watched: EngineStatus | null = null;
   private stallTimer: number | undefined;
@@ -245,14 +246,9 @@ class TtsService {
     }
   }
 
-  /** Note un événement audio (diagnostic). */
+  /** Note un événement audio (journal persistant, voir journal.ts). */
   note(event: string) {
-    const t = new Date();
-    const hh = `${t.getHours()}`.padStart(2, '0');
-    const mm = `${t.getMinutes()}`.padStart(2, '0');
-    const ss = `${t.getSeconds()}`.padStart(2, '0');
-    this.log.push(`${hh}:${mm}:${ss} ${event}`);
-    if (this.log.length > 12) this.log.shift();
+    journal(event);
   }
 
   subscribe(l: Listener) {
@@ -356,23 +352,39 @@ class TtsService {
         analyser.connect(ctx.destination);
         this.audioCtx = ctx;
         this.analyser = analyser;
-      } catch {
+        this.note(`lecteur audio créé (${ctx.state}, ${ctx.sampleRate} Hz)`);
+        ctx.onstatechange = () => this.note(`lecteur audio : ${ctx.state}`);
+      } catch (err) {
+        this.note(`lecteur audio : création impossible (${String(err).slice(0, 60)})`);
         return null;
       }
     }
     const ctx = this.audioCtx;
+    // Relance en cours (pause puis reprise) : on la laisse finir, sans reprise concurrente.
+    if (this.relaunching) return ctx;
     // « suspended » (autoplay) ou « interrupted » (iOS : micro ouvert, appel, Siri…).
     if (ctx.state !== 'running') {
-      void ctx.resume().catch(() => undefined);
+      this.note(`lecteur audio : reprise demandée (${ctx.state})`);
+      void ctx.resume().catch((err) => this.note(`lecteur audio : reprise refusée (${String(err).slice(0, 60)})`));
     } else if (isIOS() && this.seenCaptureEnds !== captureEndCount() && !captureActive()) {
       // iOS : un contexte qui jouait pendant que le micro était ouvert garde parfois la sortie
       // « appel » (écouteur du haut, volume faible) après sa fermeture ; une suspension suivie
       // d'une reprise le recale sur le haut-parleur (bug WebKit 218012).
       this.seenCaptureEnds = captureEndCount();
-      void ctx
-        .suspend()
-        .then(() => ctx.resume())
-        .catch(() => undefined);
+      if (debugFlag('noContextRelaunch')) {
+        this.note('lecteur audio : relance après le micro sautée (option de dépannage)');
+      } else {
+        this.note('lecteur audio : pause + reprise après fermeture du micro');
+        this.relaunching = true;
+        // Filet : une pause jamais confirmée (iOS « interrupted ») ne doit pas bloquer les reprises.
+        window.setTimeout(() => (this.relaunching = false), 1500);
+        void ctx
+          .suspend()
+          .then(() => ctx.resume())
+          .then(() => this.note('lecteur audio : reprise faite'))
+          .catch((err) => this.note(`lecteur audio : relance en échec (${String(err).slice(0, 60)})`))
+          .finally(() => (this.relaunching = false));
+      }
     }
     return ctx;
   }
@@ -556,6 +568,7 @@ class TtsService {
     const p = this.pending.get(id);
     if (!p || !this.audioCtx) return;
     const durMs = (audio.length / sampleRate) * 1000;
+    this.note(`voix : phrase calculée en ${Math.round(genMs)} ms (${(durMs / 1000).toFixed(1).replace('.', ',')} s d’audio)`);
     if (durMs > 200) {
       this.rtf = this.rtf * 0.6 + (genMs / durMs) * 0.4;
       if (chars > 0) this.msPerChar = this.msPerChar * 0.7 + (durMs / chars) * 0.3;
@@ -642,11 +655,17 @@ class TtsService {
     const p = this.pending.get(id);
     if (!p || !p.done || p.staged > 0 || !this.audioCtx) return;
     if (this.audioCtx.currentTime + 0.02 >= p.lastEnd) {
+      if (p.sources.length) this.note('voix : fin de lecture');
       this.pending.delete(id);
       this.speakingCount = Math.max(0, this.speakingCount - 1);
       p.resolve();
       this.emit();
     }
+  }
+
+  /** Lecteur audio de la voix, que les effets sonores partagent (iPhone : un seul lecteur audio). */
+  outputContext(): AudioContext | null {
+    return this.unlockAudio();
   }
 
   /** Lit un texte. Les appels successifs sont mis en file (lecture en flux). */
@@ -655,6 +674,7 @@ class TtsService {
     if (!clean) return Promise.resolve();
     const s = getState().settings;
     const useNeural = s.ttsEngine !== 'system' && this.neuralUsable() && !!this.unlockAudio();
+    this.note(`voix : phrase demandée (${clean.length} car., ${useNeural ? this.neuralModel : 'voix du système'})`);
     this.speakingCount++;
     this.emit();
     if (useNeural) {
@@ -737,7 +757,8 @@ class TtsService {
   }
 
   /** État audio lisible (réglages → diagnostic). */
-  diagnostics(): { label: string; value: string }[] {
+  /** État de la voix et du lecteur audio (diagnostic, voir diagnostics.ts). */
+  diagnostics(): { label: string; value: string; tone?: 'ok' | 'warn' | 'bad' }[] {
     const ctx = this.audioCtx;
     const voice = this.currentVoice();
     const voiceLabel =
@@ -747,19 +768,24 @@ class TtsService {
           ? 'Piper (voix légère)'
           : `voix du système${this.neural.status === 'loading' ? ' (voix neuronale en chargement)' : ''}`;
     const rtf = voice === 'piper' ? this.piperRtf : voice === 'kokoro' ? this.kokoroRtf : null;
-    const iso = typeof self !== 'undefined' && self.crossOriginIsolated;
-    const crash = lastCrash();
-    const reload = lastAutoReload();
+    const n = this.neural;
     return [
-      { label: 'Voix utilisée', value: voiceLabel + (rtf !== null ? ` · ${fmtRtf(rtf)} s de calcul par s de voix` : '') },
-      { label: 'Contexte audio', value: ctx ? `${ctx.state} · ${ctx.sampleRate} Hz` : 'pas encore créé (touchez « Tester la voix »)' },
-      { label: 'Session audio iOS', value: audioSessionType() ?? 'API absente' },
-      { label: 'Micro', value: captureActive() ? 'ouvert' : 'fermé' },
-      { label: 'Calcul', value: `${iso ? 'isolé' : 'non isolé'} · ${this.neuralThreads ?? (iso ? '?' : 1)} thread(s)` },
-      { label: 'Plateforme', value: `${isIOS() ? 'iOS (WebKit)' : 'autre'} · ${navigator.userAgent.match(/(Brave|CriOS|FxiOS|EdgiOS|Version\/[\d.]+ Mobile|Chrome\/\d+|Firefox\/\d+)/)?.[0] ?? '?'}` },
-      { label: 'Modèles', value: sharedModelWorker() ? 'un seul moteur partagé (économie de mémoire)' : 'un moteur par modèle' },
-      { label: 'Dernier plantage', value: crash ? `${traceTime(crash)} · ${crash.label}` : 'aucun' },
-      { label: 'Rechargement auto', value: reload ? `${traceTime(reload)} · ${reload.label}` : 'aucun' },
+      {
+        label: 'Voix utilisée',
+        value: voiceLabel + (rtf !== null ? ` · ${fmtRtf(rtf)} s de calcul par s de voix` : ''),
+        tone: voice === 'system' && isIOS() ? 'warn' : 'ok',
+      },
+      {
+        label: 'Voix neuronale',
+        value: `${{ idle: 'pas chargée', loading: 'chargement', ready: 'prête', error: 'erreur', unsupported: 'trop lente ici' }[n.status] ?? n.status}${n.detail ? ` · ${n.detail}` : ''}`,
+        tone: n.status === 'ready' ? 'ok' : n.status === 'loading' || n.status === 'idle' ? 'warn' : 'bad',
+      },
+      {
+        label: 'Lecteur audio',
+        value: ctx ? `${ctx.state} · ${ctx.sampleRate} Hz` : 'pas encore créé (touchez « Tester la voix »)',
+        tone: !ctx ? undefined : ctx.state === 'running' ? 'ok' : 'warn',
+      },
+      { label: 'Threads de la voix', value: `${this.neuralThreads ?? '?'}` },
     ];
   }
 

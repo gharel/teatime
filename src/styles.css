@@ -1964,3 +1964,63 @@ strong.label-icon,
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+/* ---------------------------- Diagnostic audio ---------------------------- */
+.diag { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.diag-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+.diag-banner.ok { background: var(--success-soft); color: var(--success); }
+.diag-banner.bad { background: var(--danger-soft); color: var(--danger); }
+.diag-banner > svg { flex-shrink: 0; margin-top: 1px; }
+.diag-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.diag-manual { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; }
+.diag-text { font-family: ui-monospace, monospace; font-size: 0.75rem; width: 100%; }
+.diag-section h4 {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-soft);
+}
+.diag-rows { margin: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.diag-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 38%) 1fr;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+}
+.diag-row + .diag-row { border-top: 1px solid var(--border); }
+.diag-row dt { display: flex; align-items: center; gap: 7px; color: var(--text-soft); }
+.diag-row dt .status-dot { width: 8px; height: 8px; }
+.diag-row dd { margin: 0; overflow-wrap: anywhere; }
+.diag-journal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.diag-journal-head h4 { margin: 0; }
+.diag-journal {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, monospace;
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+.diag-journal li { overflow-wrap: anywhere; }
+.diag-journal time { color: var(--text-soft); margin-right: 4px; }
+.diag-journal li.bad { color: var(--danger); font-weight: 700; }
+.diag-journal li.sep { color: var(--text-soft); margin-top: 4px; }
+.crash-card { border: 1px solid var(--danger); background: var(--danger-soft); margin-bottom: 16px; }
+.crash-card p { margin: 4px 0 10px; }
+@media (max-width: 480px) {
+  .diag-row { grid-template-columns: 1fr; gap: 2px; }
+}

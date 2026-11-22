@@ -22,6 +22,7 @@ import {
   releaseMicWhileSpeaking,
 } from './device';
 import { openModelWorker, type ModelWorker } from './modelWorker';
+import { journal } from './journal';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -93,11 +94,13 @@ class MicCapture {
       this.session = true;
       beginCaptureAudioSession();
     }
+    journal('micro : ouverture demandée');
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     });
     this.ctx = new AudioContext();
     this.sampleRate = this.ctx.sampleRate;
+    journal(`micro ouvert (lecteur de capture ${this.ctx.state}, ${this.sampleRate} Hz)`);
     await this.ctx.audioWorklet.addModule(new URL('worklets/capture.js', document.baseURI).href);
     const src = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, 'capture-processor');
@@ -110,6 +113,7 @@ class MicCapture {
   }
 
   stop() {
+    if (this.stream || this.ctx) journal('micro : fermeture');
     this.node?.disconnect();
     this.stream?.getTracks().forEach((t) => t.stop());
     void this.ctx?.close();
@@ -342,6 +346,7 @@ class WhisperService {
           this.emit();
         } else if (m.type === 'ready') {
           if (typeof m.warmMs === 'number') this.noteDuration(m.warmMs);
+          journal(`Whisper prêt (pré-chauffe ${Math.round(m.warmMs ?? 0)} ms)`);
           endLoad('whisper');
           this.status = { status: 'ready', progress: 1, detail: 'Whisper prêt (100 % local)' };
           this.readyWaiters.splice(0).forEach((r) => r());
@@ -353,6 +358,7 @@ class WhisperService {
           this.emit();
         } else if (m.type === 'result') {
           if (typeof m.ms === 'number') this.noteDuration(m.ms);
+          journal(`Whisper : ${m.error ? `erreur ${String(m.error).slice(0, 60)}` : `${String(m.text ?? '').length} car. en ${Math.round(m.ms ?? 0)} ms`}`);
           this.waiters.get(m.id)?.(m.text);
           this.waiters.delete(m.id);
         }
@@ -365,6 +371,7 @@ class WhisperService {
   transcribe(audio: Float32Array): Promise<string> {
     if (!this.worker) return Promise.resolve('');
     const id = this.nextId++;
+    journal(`Whisper : transcription de ${(audio.length / 16000).toFixed(1).replace('.', ',')} s d’audio`);
     return new Promise((resolve) => {
       this.waiters.set(id, resolve);
       this.worker!.postMessage({ type: 'transcribe', id, audio }, [audio.buffer]);

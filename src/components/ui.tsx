@@ -2,6 +2,9 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { Level } from '../types';
 import { getState, updateSettings, useAppState, type Badge } from '../lib/store';
+import { tts } from '../lib/tts';
+import { debugFlag, isIOS } from '../lib/device';
+import { journal } from '../lib/journal';
 import Icon, { badgeIcon, type IconName } from './Icon';
 import type { LucideIcon } from 'lucide-react';
 
@@ -175,8 +178,13 @@ export function sfx(kind: 'ok' | 'ko' | 'win' | 'tick' | 'pop') {
     /* non supporté */
   }
   try {
-    sfxCtx ??= new AudioContext();
-    const ctx = sfxCtx;
+    // iPhone : les effets passent par le lecteur audio de la voix. Un 2e lecteur, créé à la première
+    // réponse juste quand le micro se referme et que la session audio change, est un suspect du
+    // plantage de l'onglet ; iOS limite de toute façon le nombre de lecteurs.
+    const shared = isIOS() && !debugFlag('separateSfx');
+    const ctx = shared ? tts.outputContext() : (sfxCtx ??= new AudioContext());
+    if (!ctx) return;
+    if (isIOS()) journal(`effet sonore « ${kind} » (${shared ? 'lecteur de la voix' : 'lecteur séparé'})`);
     const notes: Record<typeof kind, [number, number][]> = {
       ok: [[660, 0], [990, 0.08]],
       ko: [[220, 0], [180, 0.1]],
