@@ -27,6 +27,9 @@ import { heapNote, journal } from './journal';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, tts, type EngineStatus } from './tts';
 
+/** Écoute sans aucun mot reconnu au-delà de ce délai : noté au journal (diagnostic). */
+const QUIET_NOTE_MS = 20_000;
+
 export interface ListenOptions {
   silenceMs?: number;
   /** Abandon si l'apprenant ne parle pas du tout (ms). */
@@ -771,6 +774,7 @@ export class ContinuousListener {
   private recSession = false;
   /** Démarrage de la reconnaissance en cours (journal : délai avant les premiers mots). */
   private recStartedAt = 0;
+  private quietTimer: number | undefined;
   /**
    * Écoute suspendue parce que la page est masquée (autre appli, écran verrouillé), reprise au
    * retour : en arrière-plan, iOS coupe la capture (« audio-capture »), la reconnaissance rendait
@@ -821,6 +825,7 @@ export class ContinuousListener {
   private pauseNow(why?: string) {
     if (this.paused) return;
     this.paused = true;
+    window.clearTimeout(this.quietTimer);
     journal(
       `écoute ${why ? `suspendue (${why})` : 'en pause'}${this.rec ? ' (reconnaissance du navigateur arrêtée)' : ''}${this.release ? ', micro refermé' : ''}`,
     );
@@ -957,6 +962,7 @@ export class ContinuousListener {
     document.removeEventListener('visibilitychange', this.onVisibility);
     window.clearInterval(this.recTimer);
     window.clearTimeout(this.levelTimer);
+    window.clearTimeout(this.quietTimer);
     try {
       this.rec?.abort();
     } catch {
@@ -1064,9 +1070,18 @@ export class ContinuousListener {
     rec.continuous = true;
     rec.interimResults = true;
     let heard = false;
+    let audioOn = false;
     rec.onaudiostart = () => {
+      audioOn = true;
       if (rec === this.rec) journal(`reconnaissance du navigateur : micro actif (${Math.round(performance.now() - this.recStartedAt)} ms)`);
     };
+    // Diagnostic : écoute qui n'entend rien (journal), pour distinguer un silence d'un micro muet.
+    window.clearTimeout(this.quietTimer);
+    this.quietTimer = window.setTimeout(() => {
+      if (rec === this.rec && !heard && this.running && !this.paused) {
+        journal(`reconnaissance du navigateur : rien entendu en ${QUIET_NOTE_MS / 1000} s (micro ${audioOn ? 'actif' : 'jamais signalé actif'})`);
+      }
+    }, QUIET_NOTE_MS);
     rec.onresult = (e: any) => {
       if (this.paused || rec !== this.rec) return;
       if (!heard) {
