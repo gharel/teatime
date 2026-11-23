@@ -5,7 +5,8 @@
  * Service servi dans son propre worker (embed.worker.ts) ou dans le worker partagé (models.worker.ts).
  */
 import { pipeline, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import { exclusive, type Port } from './port';
+import { exclusive, whenIdle, type Port } from './port';
+import { heapMB } from './wasmHeap';
 
 type Msg = { type: 'load' } | { type: 'embed'; id: number; texts: string[]; priority: boolean } | { type: 'dispose' };
 
@@ -27,7 +28,7 @@ export function serveEmbed(port: Port) {
       dtype: 'q8',
       progress_callback: (p: unknown) => post({ type: 'progress', p }),
     });
-    post({ type: 'ready' });
+    post({ type: 'ready', heap: heapMB() });
   }
 
   /* Les réponses de l'apprenant passent avant l'indexation des questions (file prioritaire). */
@@ -35,11 +36,16 @@ export function serveEmbed(port: Port) {
   let pumping: Promise<void> | null = null;
   async function drain() {
     while (queue.length && fe && !disposed) {
-      const job = queue.shift()!;
+      // Indexation de fond : la voix et Whisper (worker partagé) passent avant, et une réponse de
+      // l'apprenant (prioritaire, en tête de file) n'attend pas.
+      if (!queue[0].priority) await whenIdle(1500, () => disposed || !!queue[0]?.priority);
+      const job = queue.shift();
+      if (!job || !fe || disposed) break;
       const model = fe;
       try {
-        // Lot par lot : la voix et Whisper (worker partagé) passent entre deux lots.
-        const out = await exclusive(() => model(job.texts, { pooling: 'mean', normalize: true }));
+        // Lot par lot : la voix et Whisper passent entre deux lots.
+        const embed = () => model(job.texts, { pooling: 'mean', normalize: true });
+        const out = await exclusive(embed, { background: !job.priority });
         const dim = out.dims[out.dims.length - 1];
         const data = out.data as Float32Array;
         const vecs = job.texts.map((_, i) => data.slice(i * dim, (i + 1) * dim));

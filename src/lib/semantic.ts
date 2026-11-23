@@ -4,6 +4,7 @@
  * de la conversation ; chaque réponse de l'apprenant est ensuite comparée
  * à la question posée et aux autres thèmes (≈ 20 ms par phrase).
  * ------------------------------------------------------------------ */
+import { heapNote, journal } from './journal';
 import { openModelWorker, type ModelWorker } from './modelWorker';
 import { ProgressTracker, type EngineStatus } from './tts';
 
@@ -40,6 +41,7 @@ class SemanticService {
     if (!this.worker && this.status.status !== 'error') {
       this.status = { status: 'loading', progress: 0, detail: 'Préparation de la compréhension…' };
       this.emit();
+      journal('compréhension : chargement');
       this.worker = openModelWorker('embed');
       this.worker.onmessage = (e) => this.onWorker(e.data);
       this.worker.onerror = (e) => this.fail(e.message || 'Erreur du worker');
@@ -49,6 +51,7 @@ class SemanticService {
   }
 
   private fail(detail: string) {
+    journal(`compréhension : erreur (${detail.slice(0, 80)})`);
     this.status = { status: 'error', progress: 0, detail };
     this.waiters.forEach((w) => w(null));
     this.waiters.clear();
@@ -63,6 +66,7 @@ class SemanticService {
       this.status = { status: 'loading', progress: p, detail: 'Préparation de la compréhension…' };
       this.emit();
     } else if (m.type === 'ready') {
+      journal(`compréhension prête${heapNote(m.heap)}`);
       this.status = { status: 'ready', progress: 1, detail: 'Compréhension prête (locale)' };
       this.emit();
     } else if (m.type === 'error') {

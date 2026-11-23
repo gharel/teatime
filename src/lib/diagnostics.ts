@@ -7,7 +7,9 @@ import { audioSessionType, captureActive, DEBUG_FLAGS, debugFlags, isIOS } from 
 import { journalEntries, journalTime } from './journal';
 import { sharedModelWorker } from './modelWorker';
 import { lastAutoReload, lastCrash, traceTime, type Trace } from './recover';
+import { pron } from './pron';
 import { semantic } from './semantic';
+import { getState } from './store';
 import { resolveSttEngine, whisper } from './stt';
 import { tts } from './tts';
 
@@ -85,6 +87,11 @@ export function diagnosticSections(): DiagSection[] {
           tone: stt === 'whisper' ? (ws.status === 'ready' ? 'ok' : ws.status === 'error' ? 'bad' : undefined) : undefined,
         },
         { label: 'Compréhension', value: statusText(semantic.status) },
+        {
+          label: 'Analyse de prononciation',
+          value: getState().settings.pronAnalysis ? `activée · ${statusText(pron.status)}` : 'désactivée',
+          tone: getState().settings.pronAnalysis && isIOS() ? 'warn' : undefined,
+        },
       ],
     },
     {

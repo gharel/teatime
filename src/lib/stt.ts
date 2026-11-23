@@ -755,6 +755,9 @@ export class ContinuousListener {
   /** Audio récent (Web Speech ne fournit pas l'audio : on l'enregistre en parallèle). */
   private ring: { t: number; pcm: Float32Array }[] = [];
   private micRate = 48000;
+  /** Session audio « enregistrement » tenue pour la reconnaissance du navigateur seule (iPhone). */
+  private recSession = false;
+  private levelTimer: number | undefined;
   engine: 'webspeech' | 'whisper' = resolveSttEngine();
 
   constructor(private ev: ContinuousEvents) {}
@@ -799,7 +802,7 @@ export class ContinuousListener {
     this.paused = false;
     if (!this.running) return;
     if (this.engine === 'webspeech') this.restartRec();
-    if (this.release && this.ready && !this.mic) {
+    if (this.release && this.ready && !this.mic && this.captureNeeded()) {
       // iPhone : le micro a été refermé pendant qu'Emma parlait ; « Je vous écoute » une fois rouvert.
       this.ev.onState?.('loading', 'ouverture du micro');
       this.ensureMic()
@@ -813,6 +816,31 @@ export class ContinuousListener {
       return;
     }
     this.ev.onState?.('listening');
+  }
+
+  /**
+   * Capture du micro par la page (en plus de la reconnaissance du navigateur) : Whisper en a besoin,
+   * l'analyse de prononciation aussi (audio de l'énoncé). Sur iPhone, la reconnaissance du navigateur
+   * s'en passe : une seconde capture (lecteur audio + worklet, ouverts puis refermés à chaque tour)
+   * redemandait l'autorisation du micro et précédait les plantages de la page.
+   */
+  private captureNeeded(): boolean {
+    return this.engine === 'whisper' || !this.release || getState().settings.pronAnalysis;
+  }
+
+  /** Session audio iOS « enregistrement » le temps de la reconnaissance du navigateur seule. */
+  private holdSession(on: boolean) {
+    if (on === this.recSession) return;
+    this.recSession = on;
+    if (on) beginCaptureAudioSession();
+    else endCaptureAudioSession();
+  }
+
+  /** Niveau affiché sans capture : une impulsion à chaque résultat de la reconnaissance. */
+  private pulseLevel() {
+    this.ev.onLevel?.(0.5);
+    window.clearTimeout(this.levelTimer);
+    this.levelTimer = window.setTimeout(() => this.ev.onLevel?.(0), 350);
   }
 
   /** Ouvre le micro s'il doit l'être (moteur prêt, pas en pause sur iPhone) et ne l'est pas déjà. */
@@ -862,6 +890,7 @@ export class ContinuousListener {
     this.mic?.stop();
     this.mic = null;
     this.seg = null;
+    this.holdSession(false);
   }
 
   /** L'apprenant indique qu'il a fini sa phrase. */
@@ -874,6 +903,7 @@ export class ContinuousListener {
     this.running = false;
     this.ready = false;
     window.clearInterval(this.recTimer);
+    window.clearTimeout(this.levelTimer);
     try {
       this.rec?.abort();
     } catch {
@@ -933,9 +963,10 @@ export class ContinuousListener {
   /* ---------- Web Speech ---------- */
 
   private async startWebSpeech() {
-    // Micro « niveau » permanent (affiche que l'on est bien écouté)
+    // Micro « niveau » permanent (affiche que l'on est bien écouté), sauf iPhone (voir captureNeeded)
     this.ready = true;
-    await this.ensureMic();
+    if (this.captureNeeded()) await this.ensureMic();
+    else journal('reconnaissance du navigateur seule (pas de seconde capture du micro)');
     if (!this.running) return;
     this.recTimer = window.setInterval(() => {
       if (this.paused || !this.running) return;
@@ -985,6 +1016,7 @@ export class ContinuousListener {
       if (!this.wsText && !this.wsInterim) this.wsStart = performance.now() - 1500;
       this.wsInterim = webSpeechText(e.results);
       this.wsLast = performance.now();
+      if (!this.mic) this.pulseLevel();
       this.ev.onState?.('hearing');
       this.ev.onInterim?.(mergeTranscript(this.wsText, this.wsInterim));
     };
@@ -1017,6 +1049,8 @@ export class ContinuousListener {
       this.wsInterim = '';
       if (this.running && !this.paused) window.setTimeout(() => this.restartRec(), 250);
     };
+    // iOS : catégorie « play-and-record » avant d'écouter (la capture parallèle la posait jusqu'ici).
+    if (this.release && !this.captureNeeded()) this.holdSession(true);
     try {
       rec.start();
       journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);

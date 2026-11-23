@@ -2,6 +2,7 @@
 import type { PronResult } from './pronunciation';
 import { beginLoad, endLoad, interruptedLoads } from './device';
 import { friendlyLoadError } from './download';
+import { journal } from './journal';
 import { ProgressTracker, type EngineStatus } from './tts';
 
 class PronService {
@@ -22,6 +23,7 @@ class PronService {
 
   /** Échec : worker neuf au prochain essai, analyses en attente abandonnées. */
   private fail(detail: string) {
+    journal(`analyse de prononciation : erreur (${detail.slice(0, 80)})`);
     endLoad('pron');
     this.worker?.terminate();
     this.worker = null;
@@ -53,6 +55,7 @@ class PronService {
     this.status = { status: 'loading', progress: 0, detail: 'Préparation de l’analyse de prononciation…' };
     this.emit();
     beginLoad('pron');
+    journal('analyse de prononciation : chargement (gros modèle, ≈ 1 Go en mémoire)');
     const worker = new Worker(new URL('../workers/pron.worker.ts', import.meta.url), { type: 'module' });
     this.worker = worker;
     worker.onmessage = (e) => {
@@ -68,6 +71,7 @@ class PronService {
         };
         this.emit();
       } else if (m.type === 'ready') {
+        journal('analyse de prononciation prête');
         endLoad('pron');
         this.status = { status: 'ready', progress: 1, detail: 'Analyse de prononciation prête (locale)' };
         this.emit();
@@ -91,6 +95,7 @@ class PronService {
     const worker = this.worker;
     if (!worker) return Promise.resolve(null);
     const id = this.nextId++;
+    journal(`analyse de prononciation : ${(audio.length / 16000).toFixed(1).replace('.', ',')} s d’audio`);
     return new Promise((resolve) => {
       this.waiters.set(id, resolve);
       worker.postMessage({ type: 'analyze', id, audio, text }, [audio.buffer]);
