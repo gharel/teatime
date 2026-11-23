@@ -11,7 +11,16 @@ import Avatar, { type AvatarMood, type AvatarState } from '../tutor/Avatar';
 import { TutorSession, type Correction } from '../tutor/engine';
 import { looksFrench } from '../tutor/understand';
 import { tts } from '../lib/tts';
-import { ContinuousListener, listen, resolveSttEngine, webSpeechSupported, whisper, whisperCached, type ContinuousState } from '../lib/stt';
+import {
+  ContinuousListener,
+  listen,
+  pageCapturesMic,
+  resolveSttEngine,
+  webSpeechSupported,
+  whisper,
+  whisperCached,
+  type ContinuousState,
+} from '../lib/stt';
 import { llm, WEBLLM_MODELS } from '../lib/llm';
 import { wordDiff } from '../lib/corrector';
 import { pron } from '../lib/pron';
@@ -644,7 +653,8 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     const g = gen.current;
     // Mains libres : le micro s'ouvre dès le début (il est en pause tant qu'Emma parle).
     // (après un chargement interrompu, le service attend un essai manuel : bouton « Réessayer »)
-    if (getState().settings.pronAnalysis) pron.load();
+    // (iPhone + reconnaissance du navigateur : pas d'audio de l'énoncé, inutile de charger ce gros modèle)
+    if (getState().settings.pronAnalysis && pageCapturesMic()) pron.load();
     // Compréhension des réponses (petit modèle local) : prête avant la première réponse.
     session.warmUp();
     if (getState().settings.handsFree) setMic(true);
@@ -988,7 +998,9 @@ function PronEngineRow() {
         <div className="tiny muted">
           {!enabled
             ? 'Désactivée'
-            : st.status === 'idle'
+            : !pageCapturesMic()
+              ? 'Sans effet sur iPhone avec la reconnaissance du navigateur (choisissez Whisper pour l’activer)'
+              : st.status === 'idle'
               ? 'Repère vos erreurs de prononciation (TH, H, R, voyelles…) · modèle local ≈ 320 Mo, chargé au début de la conversation'
               : st.status === 'error'
                 ? `Erreur : ${st.detail}`

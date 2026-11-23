@@ -10,7 +10,7 @@ import { lastAutoReload, lastCrash, traceTime, type Trace } from './recover';
 import { pron } from './pron';
 import { semantic } from './semantic';
 import { getState } from './store';
-import { resolveSttEngine, whisper } from './stt';
+import { pageCapturesMic, resolveSttEngine, whisper } from './stt';
 import { tts } from './tts';
 
 export type Tone = 'ok' | 'warn' | 'bad';
@@ -89,7 +89,11 @@ export function diagnosticSections(): DiagSection[] {
         { label: 'Compréhension', value: statusText(semantic.status) },
         {
           label: 'Analyse de prononciation',
-          value: getState().settings.pronAnalysis ? `activée · ${statusText(pron.status)}` : 'désactivée',
+          value: !getState().settings.pronAnalysis
+            ? 'désactivée'
+            : pageCapturesMic()
+              ? `activée · ${statusText(pron.status)}`
+              : 'activée, mais sans effet ici (iPhone + reconnaissance du navigateur : pas d’audio)',
           tone: getState().settings.pronAnalysis && isIOS() ? 'warn' : undefined,
         },
       ],

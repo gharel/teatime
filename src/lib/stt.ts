@@ -19,6 +19,7 @@ import {
   endCaptureAudioSession,
   endLoad,
   interruptedLoads,
+  isIOS,
   releaseMicWhileSpeaking,
 } from './device';
 import { openModelWorker, type ModelWorker } from './modelWorker';
@@ -57,6 +58,16 @@ export function resolveSttEngine(): 'webspeech' | 'whisper' {
   const e = getState().settings.sttEngine;
   if (e === 'whisper' || !webSpeechSupported()) return 'whisper';
   return 'webspeech';
+}
+
+/**
+ * La page capte-t-elle elle-même le micro (audio de l'énoncé, pour l'analyse de prononciation) ?
+ * Whisper toujours. Avec la reconnaissance du navigateur, pas sur iPhone : iOS ne laisse le micro
+ * qu'à une capture, la seconde coupait la reconnaissance (« audio-capture », puis « not-allowed »),
+ * redemandait l'autorisation et précédait les plantages de la page.
+ */
+export function pageCapturesMic(): boolean {
+  return resolveSttEngine() === 'whisper' || !isIOS();
 }
 
 /* ------------------------------ Avis (bascule) ------------------------------ */
@@ -818,14 +829,9 @@ export class ContinuousListener {
     this.ev.onState?.('listening');
   }
 
-  /**
-   * Capture du micro par la page (en plus de la reconnaissance du navigateur) : Whisper en a besoin,
-   * l'analyse de prononciation aussi (audio de l'énoncé). Sur iPhone, la reconnaissance du navigateur
-   * s'en passe : une seconde capture (lecteur audio + worklet, ouverts puis refermés à chaque tour)
-   * redemandait l'autorisation du micro et précédait les plantages de la page.
-   */
+  /** Capture du micro par la page en plus de la reconnaissance du navigateur (voir pageCapturesMic). */
   private captureNeeded(): boolean {
-    return this.engine === 'whisper' || !this.release || getState().settings.pronAnalysis;
+    return this.engine === 'whisper' || !isIOS();
   }
 
   /** Session audio iOS « enregistrement » le temps de la reconnaissance du navigateur seule. */
@@ -1049,8 +1055,8 @@ export class ContinuousListener {
       this.wsInterim = '';
       if (this.running && !this.paused) window.setTimeout(() => this.restartRec(), 250);
     };
-    // iOS : catégorie « play-and-record » avant d'écouter (la capture parallèle la posait jusqu'ici).
-    if (this.release && !this.captureNeeded()) this.holdSession(true);
+    // iOS : catégorie « play-and-record » avant d'écouter (la page ne capte pas le micro elle-même).
+    if (!this.captureNeeded()) this.holdSession(true);
     try {
       rec.start();
       journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
