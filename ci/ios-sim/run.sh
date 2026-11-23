@@ -108,10 +108,12 @@ run() {
   data=$(xcrun simctl get_app_container "$UDID" com.teatime.harness data)
   hlog="$data/Documents/harness.log"
   rm -f "$hlog"
-  SIMCTL_CHILD_HARNESS_URL="$url" SIMCTL_CHILD_HARNESS_SETTINGS="$settings" SIMCTL_CHILD_HARNESS_TURNS=3 SIMCTL_CHILD_HARNESS_TIMEOUT=420 SIMCTL_CHILD_HARNESS_MODE="$mode" \
+  local turns="${TURNS:-3}"
+  local limit=$((240 + 90 * turns))
+  SIMCTL_CHILD_HARNESS_URL="$url" SIMCTL_CHILD_HARNESS_SETTINGS="$settings" SIMCTL_CHILD_HARNESS_TURNS="$turns" SIMCTL_CHILD_HARNESS_TIMEOUT="$limit" SIMCTL_CHILD_HARNESS_MODE="$mode" \
     xcrun simctl launch --terminate-running-process --stdout="$OUT/$label.out" --stderr="$OUT/$label.err" "$UDID" com.teatime.harness
   local t=0
-  while [ $t -lt 470 ] && ! grep -q "HARNESS EXIT" "$hlog" 2>/dev/null; do
+  while [ $t -lt $((limit + 50)) ] && ! grep -q "HARNESS EXIT" "$hlog" 2>/dev/null; do
     sleep 5
     t=$((t + 5))
     [ $t -eq 60 ] && xcrun simctl io "$UDID" screenshot "$OUT/$label-60s.png" > /dev/null 2>&1
@@ -121,6 +123,11 @@ run() {
   xcrun simctl io "$UDID" screenshot "$OUT/$label.png" > /dev/null 2>&1 || true
   xcrun simctl terminate "$UDID" com.teatime.harness > /dev/null 2>&1 || true
   grep -E "MOI :|EMMA :|FIN|DÉLAI|erreur|TERMINATED|media-permission|page http" "$OUT/$label.log" | cut -c1-220
+  # Voix d'Emma pendant cet essai (journal relayé après le clic, pas celui d'un essai précédent).
+  awk '/clic « Commencer/{on=1} on' "$OUT/$label.log" > "$OUT/$label.after"
+  c() { grep -c -- "$1" "$OUT/$label.after"; }
+  echo "voix : $(c 'phrase de ') phrases programmées, $(c 'fin de lecture') fins de lecture, $(c 'horloge figée') horloges figées, $(c 'toujours figé') abandons, $(c 'lecture toujours en cours') lectures coupées, $(c 'lecteur neuf') lecteurs neufs, $(c 'recalée') têtes recalées"
+  grep -E "départ dans|horloge|figé|lecteur neuf|toujours en cours|recalée" "$OUT/$label.after" | grep -v "départ dans 0,0 s" | cut -c1-200 | head -20
 }
 
 RUNS="${RUNS:-nouvelle nouvelle-webspeech ancienne}"

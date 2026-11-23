@@ -23,7 +23,8 @@ jobs:
       - name: Conversation dans le simulateur
         run: bash ci/ios-sim/run.sh
         env:
-          RUNS: nouvelle-tape nouvelle-voix
+          RUNS: en-ligne-voix en-ligne-tape
+          TURNS: 5
       - name: Traces
         if: always()
         uses: actions/upload-artifact@v7
