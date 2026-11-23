@@ -804,9 +804,8 @@ class TtsService {
 
   /**
    * iPhone : met le lecteur de la voix en pause avant d'ouvrir le micro ; il reprend à la phrase
-   * suivante d'Emma, micro refermé. La session audio change alors de catégorie (playback ↔ auto,
-   * enregistrement) sans lecteur en marche : lecteur actif pendant ces changements puis relancé à
-   * chaud, iOS tuait la page au tour suivant d'Emma.
+   * suivante d'Emma, micro refermé. Lecteur actif pendant l'écoute puis relancé à chaud (sortie
+   * restée sur l'écouteur, bug WebKit 218012), iOS tuait la page au tour suivant d'Emma.
    */
   async parkForCapture(): Promise<void> {
     const ctx = this.audioCtx;
@@ -949,7 +948,8 @@ class TtsService {
 
   /** Coupe immédiatement la parole et vide la file. */
   stop() {
-    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    // Seulement si la voix du système parle : sur iOS, elle touche à la session audio de la page.
+    if ('speechSynthesis' in window && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
     const ids = [...this.pending.keys()];
     if (ids.length) this.send({ type: 'cancel', ids });
     this.pending.forEach((p) => {

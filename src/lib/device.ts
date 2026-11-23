@@ -27,7 +27,7 @@ export const DEBUG_FLAGS: { id: DebugFlag; label: string; hint: string }[] = [
   {
     id: 'noAudioSession',
     label: 'Ne pas changer la session audio iOS',
-    hint: 'Par défaut : « playback » pour la voix, « play-and-record » pour la reconnaissance du navigateur, « auto » pour Whisper.',
+    hint: 'Par défaut : « playback » pour la voix, puis « play-and-record » dès la première écoute, gardée ensuite.',
   },
   {
     id: 'noContextRelaunch',
@@ -89,14 +89,24 @@ export function isIOS(): boolean {
  * Par défaut, iOS range le son Web Audio dans la catégorie « ambient » : il est coupé
  * quand l'iPhone est en mode silencieux (bouton latéral) — la voix d'Emma devient
  * muette alors que le reste fonctionne. L'API Audio Session (WebKit, iOS 16.4+)
- * permet de demander la catégorie « playback ». Avant l'écoute :
- *  - reconnaissance du navigateur seule : « play-and-record ». En « auto », WebKit ne compte
- *    pas sa capture : la reconnaissance démarrait sans rien entendre (iPhone, 23/11) ;
- *  - capture par la page (Whisper) : « auto », WebKit passe seul en enregistrement.
+ * permet de demander la catégorie « playback » : c'est celle de la voix tant que le
+ * micro n'a jamais servi.
+ *
+ * Dès la première écoute (reconnaissance du navigateur ou Whisper), la session passe en
+ * « play-and-record » et n'en change plus : WebKit garde l'unité de capture du micro
+ * d'une écoute à l'autre, et la repasser en « playback » entre deux écoutes rendait la
+ * suivante sourde, sans erreur (journaux iPhone du 23/11 : chaque écoute après une réponse
+ * d'Emma démarrait sans rien entendre ; seule une reprise après une interruption d'iOS
+ * entendait). Une catégorie imposée par la page bloque aussi celle que la capture
+ * demande (« play-and-record ») : « playback » pendant l'écoute la rendait sourde.
+ * En « play-and-record », WebKit sort le son sur le haut-parleur (DefaultToSpeaker) et le
+ * mode silencieux ne coupe pas la voix.
  * Sans cette API (autres navigateurs), ces fonctions ne font rien.
  */
 
 let activeCaptures = 0;
+/** Le micro a déjà servi sur cette page : session « play-and-record » gardée. */
+let recordingSession = false;
 /** Fermetures du micro (toutes captures confondues) et instant de la dernière. */
 let captureEpoch = 0;
 let lastCaptureEnd = -Infinity;
@@ -132,25 +142,25 @@ export function audioSessionType(): string | null {
   }
 }
 
-/** Avant de jouer la voix : le son sort même en mode silencieux. */
-export function setPlaybackAudioSession() {
-  if (activeCaptures === 0) setAudioSessionType('playback');
-}
-
 /**
- * Avant d'ouvrir le micro : « auto » pour une capture de la page (WebKit passe seul en
- * enregistrement), « play-and-record » pour la reconnaissance du navigateur seule.
+ * Avant de jouer la voix : le son sort même en mode silencieux (« playback », ou
+ * « play-and-record » gardée une fois le micro utilisé : voir plus haut).
  */
-export function beginCaptureAudioSession(type: 'auto' | 'play-and-record' = 'auto') {
-  activeCaptures++;
-  setAudioSessionType(type);
+export function setPlaybackAudioSession() {
+  if (activeCaptures === 0) setAudioSessionType(recordingSession ? 'play-and-record' : 'playback');
 }
 
-/** Micro refermé. */
+/** Avant d'ouvrir le micro (reconnaissance du navigateur ou capture par la page). */
+export function beginCaptureAudioSession() {
+  activeCaptures++;
+  recordingSession = true;
+  setAudioSessionType('play-and-record');
+}
+
+/** Micro refermé : la session reste « play-and-record » (voir plus haut). */
 export function endCaptureAudioSession() {
   activeCaptures = Math.max(0, activeCaptures - 1);
   if (activeCaptures === 0) {
-    setAudioSessionType('playback');
     captureEpoch++;
     lastCaptureEnd = performance.now();
   }

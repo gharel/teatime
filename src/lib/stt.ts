@@ -102,8 +102,7 @@ class MicCapture {
   private session = false;
 
   async start(onChunk: (pcm: Float32Array, rms: number) => void) {
-    // iOS : session audio rendue à « auto » avant d'ouvrir le micro (WebKit choisit la catégorie
-    // d'enregistrement), « playback » à la fermeture.
+    // iOS : session audio « play-and-record » avant d'ouvrir le micro, gardée ensuite (voir device.ts).
     if (!this.session) {
       await tts.parkForCapture();
       this.session = true;
@@ -775,6 +774,8 @@ export class ContinuousListener {
   /** Démarrage de la reconnaissance en cours (journal : délai avant les premiers mots). */
   private recStartedAt = 0;
   private quietTimer: number | undefined;
+  /** Relances d'une écoute restée sourde (une seule par écoute). */
+  private quietRestarts = 0;
   /**
    * Écoute suspendue parce que la page est masquée (autre appli, écran verrouillé), reprise au
    * retour : en arrière-plan, iOS coupe la capture (« audio-capture »), la reconnaissance rendait
@@ -858,6 +859,7 @@ export class ContinuousListener {
   private resumeNow() {
     if (!this.paused) return;
     this.paused = false;
+    this.quietRestarts = 0;
     if (!this.running) return;
     if (this.engine === 'webspeech') this.restartRec();
     if (this.release && this.ready && !this.mic && this.captureNeeded()) {
@@ -882,13 +884,13 @@ export class ContinuousListener {
   }
 
   /**
-   * Session audio iOS « play-and-record » le temps de la reconnaissance du navigateur seule : en
-   * « auto », WebKit ne compte pas sa capture et elle n'entendait rien (voir device.ts).
+   * Micro tenu par la reconnaissance du navigateur seule (iPhone) : session audio
+   * « play-and-record », gardée après l'écoute (voir device.ts).
    */
   private holdSession(on: boolean) {
     if (on === this.recSession) return;
     this.recSession = on;
-    if (on) beginCaptureAudioSession('play-and-record');
+    if (on) beginCaptureAudioSession();
     else endCaptureAudioSession();
   }
 
@@ -1075,17 +1077,24 @@ export class ContinuousListener {
       audioOn = true;
       if (rec === this.rec) journal(`reconnaissance du navigateur : micro actif (${Math.round(performance.now() - this.recStartedAt)} ms)`);
     };
-    // Diagnostic : écoute qui n'entend rien (journal), pour distinguer un silence d'un micro muet.
+    // Écoute qui n'entend rien : noté au journal (silence ou micro muet ?), puis une relance avec
+    // une reconnaissance neuve. Sur iOS, une reconnaissance peut rester sourde sans aucune erreur.
     window.clearTimeout(this.quietTimer);
     this.quietTimer = window.setTimeout(() => {
-      if (rec === this.rec && !heard && this.running && !this.paused) {
-        journal(`reconnaissance du navigateur : rien entendu en ${QUIET_NOTE_MS / 1000} s (micro ${audioOn ? 'actif' : 'jamais signalé actif'})`);
-      }
+      if (rec !== this.rec || heard || !this.running || this.paused) return;
+      const retry = this.quietRestarts < 1;
+      journal(
+        `reconnaissance du navigateur : rien entendu en ${QUIET_NOTE_MS / 1000} s (micro ${audioOn ? 'actif' : 'jamais signalé actif'})${retry ? ', relance' : ''}`,
+      );
+      if (!retry) return;
+      this.quietRestarts++;
+      this.restartRec();
     }, QUIET_NOTE_MS);
     rec.onresult = (e: any) => {
       if (this.paused || rec !== this.rec) return;
       if (!heard) {
         heard = true;
+        this.quietRestarts = 0;
         journal(`reconnaissance du navigateur : premiers mots ${((performance.now() - this.recStartedAt) / 1000).toFixed(1).replace('.', ',')} s après le démarrage`);
       }
       // Début d'énoncé : les résultats arrivent avec ~1 s de retard sur la voix.
@@ -1127,7 +1136,7 @@ export class ContinuousListener {
     };
     const begin = () => {
       if (rec !== this.rec || !this.running || this.paused) return;
-      // iOS : session audio « play-and-record » avant d'écouter (voir holdSession).
+      // iOS : session audio « play-and-record » avant d'écouter, gardée ensuite (voir device.ts).
       if (!this.captureNeeded()) this.holdSession(true);
       try {
         this.recStartedAt = performance.now();
@@ -1137,7 +1146,7 @@ export class ContinuousListener {
         journal(`reconnaissance du navigateur : démarrage refusé (${String(err).slice(0, 60)})`);
       }
     };
-    // iOS : lecteur de la voix en pause avant le changement de session audio (voir parkForCapture).
+    // iOS : lecteur de la voix en pause pendant l'écoute (voir parkForCapture).
     if (!this.captureNeeded() && !this.recSession) void tts.parkForCapture().then(begin);
     else begin();
   }
