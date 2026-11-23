@@ -3,7 +3,7 @@ import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react
 import type { Level } from '../types';
 import { getState, updateSettings, useAppState, type Badge } from '../lib/store';
 import { tts } from '../lib/tts';
-import { debugFlag, isIOS } from '../lib/device';
+import { captureActive, debugFlag, isIOS } from '../lib/device';
 import { journal } from '../lib/journal';
 import Icon, { badgeIcon, type IconName } from './Icon';
 import type { LucideIcon } from 'lucide-react';
@@ -182,6 +182,11 @@ export function sfx(kind: 'ok' | 'ko' | 'win' | 'tick' | 'pop') {
     // réponse juste quand le micro se referme et que la session audio change, est un suspect du
     // plantage de l'onglet ; iOS limite de toute façon le nombre de lecteurs.
     const shared = isIOS() && !debugFlag('separateSfx');
+    // iPhone, micro ouvert : le lecteur est en pause pendant l'écoute, et le micro entendrait l'effet.
+    if (shared && captureActive()) {
+      journal(`effet sonore « ${kind} » sauté (micro ouvert)`);
+      return;
+    }
     const ctx = shared ? tts.outputContext() : (sfxCtx ??= new AudioContext());
     if (!ctx) return;
     if (isIOS()) journal(`effet sonore « ${kind} » (${shared ? 'lecteur de la voix' : 'lecteur séparé'})`);

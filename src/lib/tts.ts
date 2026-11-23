@@ -218,7 +218,8 @@ class TtsService {
     // quand le micro s'ouvre, après un appel, Siri… : chaque toucher relance ce qui doit l'être.
     const onGesture = () => {
       this.primeSystemSpeech();
-      if (this.audioCtx && this.audioCtx.state !== 'running') {
+      // Pas pendant l'écoute : le lecteur y est en pause exprès (voir parkForCapture).
+      if (this.audioCtx && this.audioCtx.state !== 'running' && !captureActive()) {
         setPlaybackAudioSession();
         void this.audioCtx.resume().catch(() => undefined);
       }
@@ -366,6 +367,9 @@ class TtsService {
     if (ctx.state !== 'running') {
       this.note(`lecteur audio : reprise demandée (${ctx.state})`);
       void ctx.resume().catch((err) => this.note(`lecteur audio : reprise refusée (${String(err).slice(0, 60)})`));
+      // Lecteur arrêté pendant l'écoute puis repris micro fermé : il repart sur la bonne sortie,
+      // pas besoin de la relance ci-dessous.
+      if (isIOS() && !captureActive()) this.seenCaptureEnds = captureEndCount();
     } else if (isIOS() && this.seenCaptureEnds !== captureEndCount() && !captureActive()) {
       // iOS : un contexte qui jouait pendant que le micro était ouvert garde parfois la sortie
       // « appel » (écouteur du haut, volume faible) après sa fermeture ; une suspension suivie
@@ -666,6 +670,20 @@ class TtsService {
   /** Lecteur audio de la voix, que les effets sonores partagent (iPhone : un seul lecteur audio). */
   outputContext(): AudioContext | null {
     return this.unlockAudio();
+  }
+
+  /**
+   * iPhone : met le lecteur de la voix en pause avant d'ouvrir le micro ; il reprend à la phrase
+   * suivante d'Emma, micro refermé. La session audio change alors de catégorie (playback ↔
+   * play-and-record) sans lecteur en marche : lecteur actif pendant ces changements puis relancé à
+   * chaud, iOS tuait la page au tour suivant d'Emma.
+   */
+  async parkForCapture(): Promise<void> {
+    const ctx = this.audioCtx;
+    if (!isIOS() || !ctx || ctx.state !== 'running' || this.speakingCount > 0 || this.relaunching) return;
+    if (debugFlag('noContextRelaunch')) return;
+    this.note('lecteur audio : mis en pause pendant l’écoute');
+    await Promise.race([ctx.suspend().catch(() => undefined), new Promise((r) => window.setTimeout(r, 700))]);
   }
 
   /** Lit un texte. Les appels successifs sont mis en file (lecture en flux). */

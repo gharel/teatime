@@ -25,7 +25,7 @@ import {
 import { openModelWorker, type ModelWorker } from './modelWorker';
 import { heapNote, journal } from './journal';
 import { getState, updateSettings } from './store';
-import { ProgressTracker, type EngineStatus } from './tts';
+import { ProgressTracker, tts, type EngineStatus } from './tts';
 
 export interface ListenOptions {
   silenceMs?: number;
@@ -102,6 +102,7 @@ class MicCapture {
     // iOS : catégorie « play-and-record » posée avant d'ouvrir le micro (sinon la voix d'Emma
     // passe à mi-volume ou dans l'écouteur du haut).
     if (!this.session) {
+      await tts.parkForCapture();
       this.session = true;
       beginCaptureAudioSession();
     }
@@ -1055,13 +1056,19 @@ export class ContinuousListener {
       this.wsInterim = '';
       if (this.running && !this.paused) window.setTimeout(() => this.restartRec(), 250);
     };
-    // iOS : catégorie « play-and-record » avant d'écouter (la page ne capte pas le micro elle-même).
-    if (!this.captureNeeded()) this.holdSession(true);
-    try {
-      rec.start();
-      journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
-    } catch {
-      /* déjà démarrée */
-    }
+    const begin = () => {
+      if (rec !== this.rec || !this.running || this.paused) return;
+      // iOS : catégorie « play-and-record » avant d'écouter (la page ne capte pas le micro elle-même).
+      if (!this.captureNeeded()) this.holdSession(true);
+      try {
+        rec.start();
+        journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
+      } catch {
+        /* déjà démarrée */
+      }
+    };
+    // iOS : lecteur de la voix en pause avant le changement de session audio (voir parkForCapture).
+    if (!this.captureNeeded() && !this.recSession) void tts.parkForCapture().then(begin);
+    else begin();
   }
 }

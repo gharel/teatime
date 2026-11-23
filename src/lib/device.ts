@@ -31,8 +31,8 @@ export const DEBUG_FLAGS: { id: DebugFlag; label: string; hint: string }[] = [
   },
   {
     id: 'noContextRelaunch',
-    label: 'Ne pas relancer le lecteur audio après le micro',
-    hint: 'Par défaut : pause puis reprise du lecteur à chaque fermeture du micro (sortie haut-parleur).',
+    label: 'Ne pas mettre le lecteur audio en pause pour le micro',
+    hint: 'Par défaut : lecteur en pause pendant l’écoute, repris quand Emma parle (sinon relancé après le micro).',
   },
   {
     id: 'separateSfx',
