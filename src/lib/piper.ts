@@ -132,3 +132,33 @@ export function splitSentences(text: string): string[] {
   if (rest) out.push(rest);
   return out;
 }
+
+/**
+ * Découpe une phrase longue à la ponctuation intérieure (virgule, point-virgule, deux-points, tiret) :
+ * chaque morceau est une inférence Piper plus courte, donc un tas WASM qui grandit moins (sur iPhone,
+ * une phrase de 58 caractères le faisait passer de 172 à 207 Mo juste avant que la page soit tuée).
+ * Les morceaux trop courts (< `min`) sont recollés à leur voisin ; sans ponctuation, la phrase reste entière.
+ */
+export function splitLongSentence(sentence: string, max = 40, min = 12): string[] {
+  const s = sentence.trim();
+  if (!s) return [];
+  if (s.length <= max) return [s];
+  const parts = s
+    .replace(/([,;:—–])\s+/g, '$1\u0000')
+    .split('\u0000')
+    .filter(Boolean);
+  if (parts.length < 2) return [s];
+  const out: string[] = [];
+  let cur = '';
+  for (const p of parts) {
+    if (!cur) cur = p;
+    else if (cur.length < min || cur.length + 1 + p.length <= max) cur += ` ${p}`;
+    else {
+      out.push(cur);
+      cur = p;
+    }
+  }
+  if (cur.length < min && out.length) out[out.length - 1] += ` ${cur}`;
+  else if (cur) out.push(cur);
+  return out;
+}

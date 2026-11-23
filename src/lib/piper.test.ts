@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizePeak, piperPhonemeIds, piperPunctuation, piperText, splitForPhonemes, splitSentences } from './piper';
+import { normalizePeak, piperPhonemeIds, piperPunctuation, piperText, splitForPhonemes, splitLongSentence, splitSentences } from './piper';
 
 const MAP: Record<string, number[]> = {
   _: [0],
@@ -77,5 +77,29 @@ describe('Piper : découpage en phrases', () => {
   it('garde un texte sans ponctuation finale', () => {
     expect(splitSentences('  Nice to meet you  ')).toEqual(['Nice to meet you']);
     expect(splitSentences('')).toEqual([]);
+  });
+});
+
+describe('Piper : phrases longues découpées à la ponctuation', () => {
+  it('laisse les phrases courtes entières', () => {
+    expect(splitLongSentence('Hello Tom, how are you?')).toEqual(['Hello Tom, how are you?']);
+  });
+  it('coupe aux virgules et points-virgules en gardant la ponctuation', () => {
+    expect(splitLongSentence('I like to go to the beach with my family, especially in summer when it is hot.')).toEqual([
+      'I like to go to the beach with my family,',
+      'especially in summer when it is hot.',
+    ]);
+    expect(splitLongSentence('First, we went to the market; then we cooked a big dinner together.')).toEqual([
+      'First, we went to the market;',
+      'then we cooked a big dinner together.',
+    ]);
+  });
+  it('recolle les morceaux trop courts et garde une phrase sans ponctuation', () => {
+    expect(splitLongSentence('Well, I think that travelling by train is the most relaxing way to see a country.')).toEqual([
+      'Well, I think that travelling by train is the most relaxing way to see a country.',
+    ]);
+    expect(splitLongSentence('Do you usually travel with your friends or with your family')).toEqual([
+      'Do you usually travel with your friends or with your family',
+    ]);
   });
 });

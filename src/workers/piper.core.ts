@@ -18,6 +18,7 @@ import {
   PIPER_CACHE,
   PIPER_VOICE,
   splitForPhonemes,
+  splitLongSentence,
   splitSentences,
   type PiperConfig,
 } from '../lib/piper';
@@ -138,10 +139,11 @@ export async function createPiper(progress: Progress): Promise<Synth> {
   return {
     threads: 1,
     async *stream(text, speed) {
-      for (const sentence of splitSentences(text)) {
-        const phonemes = await piperPhonemes(sentence, lang);
+      // Phrase par phrase, et les longues en morceaux (à la ponctuation) : inférences courtes.
+      for (const part of splitSentences(text).flatMap((s) => splitLongSentence(s))) {
+        const phonemes = await piperPhonemes(part, lang);
         if (!phonemes) continue;
-        yield { audio: (await run(phonemes, speed)).audio, sampleRate, phonemes, text: sentence };
+        yield { audio: (await run(phonemes, speed)).audio, sampleRate, phonemes, text: part };
       }
     },
     async once(text) {
