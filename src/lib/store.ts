@@ -4,7 +4,7 @@
  * ------------------------------------------------------------------ */
 import { useSyncExternalStore } from 'react';
 import type { Level, Skill } from '../types';
-import { constrainedDevice } from './device';
+import { constrainedDevice, isIOS } from './device';
 import { hashString, seeded } from './text';
 
 export type TtsEngine = 'kokoro' | 'piper' | 'system';
@@ -115,10 +115,11 @@ export const DEFAULT_SETTINGS: Settings = {
   kokoroVoice: 'af_heart',
   kokoroDevice: 'auto',
   kokoroEvenIfSlow: false,
-  settingsRev: 4,
+  settingsRev: 5,
   systemVoice: '',
   speechRate: 1,
-  sttEngine: 'webspeech',
+  // iPhone : la reconnaissance du navigateur n'entend que la première réponse (voir stt.ts).
+  sttEngine: isIOS() ? 'whisper' : 'webspeech',
   sttLang: 'en-US',
   // Multilingue (pas « .en ») : il reconnaît le français au lieu de le traduire en anglais.
   whisperModel: 'onnx-community/whisper-base',
@@ -173,6 +174,9 @@ function migrateSettings(st: Settings): Settings {
   if (s.settingsRev < 3) s = { ...s, pronAnalysis: s.pronAnalysis && !constrainedDevice(), settingsRev: 3 };
   // v4 : les modèles Whisper « .en » traduisaient en anglais ce que l'apprenant disait en français.
   if (s.settingsRev < 4) s = { ...s, whisperModel: s.whisperModel.replace(/\.en$/, ''), settingsRev: 4 };
+  // v5 : sur iPhone, la reconnaissance du navigateur relancée peu après la précédente reste sourde
+  // (bug WebKit 321436) : Emma n'entendait jamais la 2e réponse. Whisper (sur l'appareil) d'office.
+  if (s.settingsRev < 5) s = { ...s, sttEngine: isIOS() ? 'whisper' : s.sttEngine, settingsRev: 5 };
   return s;
 }
 

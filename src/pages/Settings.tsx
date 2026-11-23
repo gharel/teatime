@@ -177,6 +177,13 @@ export default function Settings() {
             Dans Chrome, la reconnaissance du navigateur est gratuite mais l'audio est traité par un service en ligne de Google ; elle
             n'écoute que l'anglais. Whisper fonctionne entièrement sur votre appareil et reconnaît aussi le français : Emma vous aide
             alors à le dire en anglais.
+            {isIOS() && (
+              <>
+                {' '}
+                <strong>Sur iPhone, Whisper est recommandé</strong> : la reconnaissance du navigateur n'y entend souvent plus rien après
+                une première réponse (bug d'iOS) ; Emma passe alors d'elle-même sur Whisper.
+              </>
+            )}
           </span>
         </label>
         {s.sttEngine === 'whisper' && (

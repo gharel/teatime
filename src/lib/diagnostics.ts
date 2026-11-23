@@ -10,7 +10,7 @@ import { lastAutoReload, lastCrash, traceTime, type Trace } from './recover';
 import { pron } from './pron';
 import { semantic } from './semantic';
 import { getState } from './store';
-import { pageCapturesMic, resolveSttEngine, whisper } from './stt';
+import { captureContextState, pageCapturesMic, resolveSttEngine, whisper } from './stt';
 import { tts } from './tts';
 
 export type Tone = 'ok' | 'warn' | 'bad';
@@ -78,6 +78,7 @@ export function diagnosticSections(): DiagSection[] {
       rows: [
         { label: 'Micro', value: captureActive() ? 'ouvert' : 'fermé' },
         { label: 'Session audio iOS', value: session ?? 'API absente' },
+        ...(stt === 'whisper' ? [{ label: 'Lecteur de capture', value: captureContextState() }] : []),
         {
           label: 'Reconnaissance',
           value:

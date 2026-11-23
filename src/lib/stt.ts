@@ -24,6 +24,7 @@ import {
 } from './device';
 import { openModelWorker, type ModelWorker } from './modelWorker';
 import { heapNote, journal } from './journal';
+import { crashOnStartup } from './recover';
 import { getState, updateSettings } from './store';
 import { ProgressTracker, tts, type EngineStatus } from './tts';
 
@@ -59,9 +60,25 @@ export function webSpeechSupported(): boolean {
 /** Moteur réellement utilisé selon les réglages et le navigateur. */
 export function resolveSttEngine(): 'webspeech' | 'whisper' {
   const e = getState().settings.sttEngine;
-  if (e === 'whisper' || !webSpeechSupported()) return 'whisper';
-  return 'webspeech';
+  if (!webSpeechSupported()) return 'whisper';
+  if (e !== 'whisper') return 'webspeech';
+  // iPhone : la page a été tuée deux fois de suite pendant le chargement de Whisper (mémoire) :
+  // reconnaissance du navigateur plutôt qu'un plantage à chaque ouverture.
+  if (isIOS() && interruptedLoads('whisper').count >= 2) return 'webspeech';
+  return 'whisper';
 }
+
+/**
+ * iOS : une reconnaissance du navigateur démarrée moins de ~45 s après la fin de la précédente
+ * reste sourde, sans résultat, erreur ni fin (bug WebKit 321436, iOS 26 à 27.3 ; constaté aussi
+ * sans aucun son joué entre les deux). Rien côté page ne la réveille (nouvel objet, stop/abort,
+ * getUserMedia, iframe neuve) : dans une conversation, la 2e réponse n'était jamais entendue.
+ */
+const IOS_REC_COOLDOWN_MS = 45_000;
+/** iOS : délai sans aucun mot avant de conclure à une reconnaissance sourde (relancée trop tôt). */
+const IOS_DEAF_MS = 12_000;
+/** Fin de la dernière session de reconnaissance du navigateur. */
+let lastRecEnd = -Infinity;
 
 /**
  * La page capte-t-elle elle-même le micro (audio de l'énoncé, pour l'analyse de prononciation) ?
@@ -83,25 +100,132 @@ export function onSttNotice(cb: (msg: string) => void) {
 
 const NETWORK_FALLBACK_MSG =
   'La reconnaissance vocale du navigateur est injoignable ici. Emma utilise maintenant Whisper, qui fonctionne entièrement sur votre appareil.';
+const IOS_DEAF_MSG =
+  'Sur iPhone, la reconnaissance du navigateur n’entend plus rien après une première réponse (bug d’iOS). Emma utilise maintenant Whisper, qui fonctionne entièrement sur votre appareil.';
+const WHISPER_FAILED_MSG =
+  'Whisper n’a pas pu se charger : Emma écoute avec la reconnaissance du navigateur (sur iPhone, elle peut ne pas entendre la réponse suivante).';
 
-/** La reconnaissance du navigateur a échoué (réseau) : on passe à Whisper pour de bon. */
-function fallbackToWhisper() {
+/** La reconnaissance du navigateur a échoué (réseau, ou sourde sur iPhone) : on passe à Whisper pour de bon. */
+function fallbackToWhisper(msg = NETWORK_FALLBACK_MSG) {
   if (getState().settings.sttEngine !== 'whisper') updateSettings({ sttEngine: 'whisper' });
-  noticeListeners.forEach((l) => l(NETWORK_FALLBACK_MSG));
+  noticeListeners.forEach((l) => l(msg));
   void whisper.load();
 }
 
 /* --------------------------- Micro + niveau --------------------------- */
 
+/**
+ * Lecteur audio de la capture (worklet), gardé d'une écoute à l'autre et suspendu entre deux.
+ * WebKit (iOS) ne laisse démarrer un lecteur sans toucher que si la page capte déjà le micro à
+ * l'instant où il le demande (AudioContext::willBeginPlayback) ; sinon sa reprise reste en attente
+ * pour toujours : micro ouvert, voyant allumé, aucun son livré. Un lecteur qui a démarré une fois
+ * (pendant un toucher : primeMicCapture, ou pendant une capture) repart ensuite sans geste.
+ */
+let captureCtx: AudioContext | null = null;
+let captureModule: Promise<void> | null = null;
+let captureSink: GainNode | null = null;
+/** Captures en cours sur ce lecteur (il n'est suspendu qu'à la dernière fermeture). */
+let captureUsers = 0;
+
+function captureContext(): AudioContext {
+  if (!captureCtx || captureCtx.state === 'closed') {
+    const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    captureCtx = new Ctor();
+    captureModule = null;
+    captureSink = null;
+  }
+  return captureCtx;
+}
+
+/** Abandonne le lecteur de capture (bloqué) : le prochain sera créé pendant la capture. */
+function dropCaptureContext(ctx: AudioContext) {
+  if (captureCtx !== ctx) return;
+  captureCtx = null;
+  captureModule = null;
+  captureSink = null;
+  void ctx.close().catch(() => undefined);
+}
+
+function captureWorklet(ctx: AudioContext): Promise<void> {
+  if (!captureModule) {
+    captureModule = ctx.audioWorklet.addModule(new URL('worklets/capture.js', document.baseURI).href).catch((err) => {
+      captureModule = null;
+      throw err;
+    });
+  }
+  return captureModule;
+}
+
+/** Sortie à gain nul : le worklet doit être relié à la sortie pour être cadencé dans certains navigateurs. */
+function captureOutput(ctx: AudioContext): AudioNode {
+  if (!captureSink) {
+    captureSink = ctx.createGain();
+    captureSink.gain.value = 0;
+    captureSink.connect(ctx.destination);
+  }
+  return captureSink;
+}
+
+/**
+ * Démarre le lecteur de capture. Plusieurs demandes espacées : WebKit ne réévalue son autorisation
+ * qu'à chaque demande, et la page n'est comptée « en capture » qu'un instant après getUserMedia.
+ */
+async function runCaptureContext(ctx: AudioContext): Promise<boolean> {
+  for (let i = 0; i < 6 && ctx.state !== 'running'; i++) {
+    await Promise.race([ctx.resume().catch(() => undefined), new Promise((r) => window.setTimeout(r, 350))]);
+  }
+  return ctx.state === 'running';
+}
+
+/** État du lecteur de capture (diagnostic). */
+export function captureContextState(): string {
+  return captureCtx ? `${captureCtx.state} · ${captureCtx.sampleRate} Hz` : 'pas encore créé';
+}
+
+/**
+ * À appeler pendant un toucher (Commencer, bouton du micro) : sur iPhone avec Whisper, le lecteur
+ * de capture démarre pendant le geste, puis repart sans geste à chaque écoute.
+ */
+export function primeMicCapture() {
+  if (typeof window === 'undefined' || !isIOS() || resolveSttEngine() !== 'whisper') return;
+  try {
+    const ctx = captureContext();
+    if (ctx.state === 'running') return;
+    void ctx
+      .resume()
+      .then(() => {
+        if (captureUsers === 0 && captureCtx === ctx && ctx.state === 'running') void ctx.suspend().catch(() => undefined);
+      })
+      .catch(() => undefined);
+  } catch {
+    /* sans gravité : il sera créé pendant la capture */
+  }
+}
+
+/** Micro qui ne livre plus rien (lecteur bloqué, piste muette ou coupée par le système). */
+type MicDead = (why: string) => void;
+
 class MicCapture {
   stream: MediaStream | null = null;
   ctx: AudioContext | null = null;
   node: AudioWorkletNode | null = null;
+  private src: MediaStreamAudioSourceNode | null = null;
   sampleRate = 48000;
 
   private session = false;
+  /** Surveillance : aucun son, plus de son, ou que des zéros (piste rendue muette par iOS). */
+  private watch: number | undefined;
+  private openedAt = 0;
+  private chunks = 0;
+  private lastChunk = 0;
+  private lastSound = 0;
+  private peak = 0;
+  private nudged = false;
+  /** Piste signalée muette par le système depuis cet instant (0 : active). */
+  private mutedSince = 0;
+  private onDead: MicDead | undefined;
 
-  async start(onChunk: (pcm: Float32Array, rms: number) => void) {
+  async start(onChunk: (pcm: Float32Array, rms: number) => void, onDead?: MicDead) {
     // iOS : session audio « play-and-record » avant d'ouvrir le micro, gardée ensuite (voir device.ts).
     if (!this.session) {
       await tts.parkForCapture();
@@ -112,28 +236,116 @@ class MicCapture {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     });
-    this.ctx = new AudioContext();
+    for (const t of this.stream.getAudioTracks()) {
+      t.onended = () => this.dead('micro coupé par le système');
+      t.onmute = () => {
+        this.mutedSince = performance.now();
+        journal('micro : piste rendue muette par le système');
+      };
+      t.onunmute = () => {
+        this.mutedSince = 0;
+        journal('micro : piste de nouveau active');
+      };
+    }
+    this.openedAt = performance.now();
+    this.lastSound = this.openedAt;
+    this.ctx = captureContext();
+    captureUsers++;
+    let running = await this.connect(this.ctx, onChunk);
+    if (!running && captureUsers === 1) {
+      // Lecteur resté bloqué (créé hors geste avant la capture) : un neuf, créé pendant la capture, peut démarrer.
+      journal(`micro : lecteur de capture bloqué (${this.ctx.state}), lecteur neuf`);
+      this.disconnect();
+      dropCaptureContext(this.ctx);
+      this.ctx = captureContext();
+      running = await this.connect(this.ctx, onChunk);
+    }
     this.sampleRate = this.ctx.sampleRate;
     journal(`micro ouvert (lecteur de capture ${this.ctx.state}, ${this.sampleRate} Hz)`);
-    await this.ctx.audioWorklet.addModule(new URL('worklets/capture.js', document.baseURI).href);
-    const src = this.ctx.createMediaStreamSource(this.stream);
-    this.node = new AudioWorkletNode(this.ctx, 'capture-processor');
-    this.node.port.onmessage = (e) => onChunk(e.data.pcm, e.data.rms);
-    src.connect(this.node);
-    // Le worklet doit être relié à la sortie pour être cadencé dans certains navigateurs : gain nul.
-    const mute = this.ctx.createGain();
-    mute.gain.value = 0;
-    this.node.connect(mute).connect(this.ctx.destination);
+    this.onDead = onDead;
+    window.clearInterval(this.watch);
+    this.watch = window.setInterval(() => this.check(), 1000);
+  }
+
+  private async connect(ctx: AudioContext, onChunk: (pcm: Float32Array, rms: number) => void): Promise<boolean> {
+    await captureWorklet(ctx);
+    this.src = ctx.createMediaStreamSource(this.stream!);
+    this.node = new AudioWorkletNode(ctx, 'capture-processor');
+    this.node.port.onmessage = (e) => {
+      const now = performance.now();
+      const rms: number = e.data.rms;
+      if (!this.chunks) journal(`micro : premier son ${Math.round(now - this.openedAt)} ms après l’ouverture`);
+      this.chunks++;
+      this.lastChunk = now;
+      // Que des zéros : piste muette (un vrai micro, même au calme, n'est jamais exactement nul).
+      if (rms > 0) this.lastSound = now;
+      if (rms > this.peak) this.peak = rms;
+      onChunk(e.data.pcm, rms);
+    };
+    this.src.connect(this.node);
+    this.node.connect(captureOutput(ctx));
+    return runCaptureContext(ctx);
+  }
+
+  private check() {
+    if (!this.ctx) return;
+    const now = performance.now();
+    let why = '';
+    if (!this.chunks) {
+      if (now - this.openedAt > 2500 && !this.nudged) {
+        this.nudged = true;
+        journal(`micro : aucun son en 2,5 s (lecteur de capture ${this.ctx.state}), relance du lecteur`);
+        void this.ctx.resume().catch(() => undefined);
+      }
+      if (now - this.openedAt > 6000) why = `aucun son du micro en 6 s (lecteur de capture ${this.ctx.state})`;
+    } else if (now - this.lastChunk > 3000) {
+      why = `le micro ne livre plus de son (lecteur de capture ${this.ctx.state})`;
+    } else if (this.lastSound === this.openedAt && now - this.openedAt > 6000) {
+      // Que des zéros depuis l'ouverture : piste muette (un vrai micro n'est jamais exactement nul).
+      why = 'micro muet depuis l’ouverture (que des zéros)';
+    } else if (this.mutedSince && now - this.mutedSince > 4000) {
+      why = 'piste muette depuis 4 s';
+    }
+    if (why) this.dead(why);
+  }
+
+  private dead(why: string) {
+    window.clearInterval(this.watch);
+    const cb = this.onDead;
+    this.onDead = undefined;
+    journal(`micro : ${why}`);
+    cb?.(why);
+  }
+
+  private disconnect() {
+    if (this.node) this.node.port.onmessage = null;
+    this.node?.disconnect();
+    this.src?.disconnect();
+    this.node = null;
+    this.src = null;
   }
 
   stop() {
-    if (this.stream || this.ctx) journal('micro : fermeture');
-    this.node?.disconnect();
-    this.stream?.getTracks().forEach((t) => t.stop());
-    void this.ctx?.close();
-    this.node = null;
+    window.clearInterval(this.watch);
+    this.onDead = undefined;
+    if (this.stream || this.ctx) {
+      const s = this.openedAt ? ((performance.now() - this.openedAt) / 1000).toFixed(1).replace('.', ',') : '0';
+      journal(`micro : fermeture (${s} s, ${this.chunks} blocs, niveau max ${this.peak.toFixed(3).replace('.', ',')})`);
+    }
+    this.disconnect();
+    this.stream?.getTracks().forEach((t) => {
+      t.onended = null;
+      t.onmute = null;
+      t.onunmute = null;
+      t.stop();
+    });
     this.stream = null;
-    this.ctx = null;
+    if (this.ctx) {
+      // Lecteur gardé pour la prochaine écoute (il repartira sans geste), suspendu en attendant.
+      captureUsers = Math.max(0, captureUsers - 1);
+      if (captureUsers === 0 && this.ctx.state === 'running') void this.ctx.suspend().catch(() => undefined);
+      this.ctx = null;
+    }
     if (this.session) {
       this.session = false;
       endCaptureAudioSession();
@@ -304,6 +516,21 @@ export function webSpeechText(results: ArrayLike<ArrayLike<{ transcript: string 
 
 /* ------------------------------ Whisper ------------------------------ */
 
+const LIGHT_WHISPER = 'onnx-community/whisper-tiny';
+
+/**
+ * iPhone : la page a été tuée (mémoire) pendant une conversation où Whisper écoutait : modèle tiny,
+ * ≈ 100 Mo de moins en mémoire et deux fois plus rapide, un peu moins précis. Le modèle reste
+ * modifiable dans les réglages.
+ */
+function lighterWhisperAfterCrash() {
+  const crash = crashOnStartup();
+  const model = getState().settings.whisperModel;
+  if (!crash || !isIOS() || !/^conversation .*Whisper/.test(crash.label) || model === LIGHT_WHISPER) return;
+  updateSettings({ whisperModel: LIGHT_WHISPER });
+  journal(`page tuée pendant la conversation : Whisper passe de ${model.split('/').pop()} à ${LIGHT_WHISPER.split('/').pop()} (plus léger)`);
+}
+
 class WhisperService {
   status: EngineStatus = { status: 'idle', progress: 0 };
   private worker: ModelWorker | null = null;
@@ -335,6 +562,7 @@ class WhisperService {
   async load() {
     if (this.status.status === 'ready') return;
     if (this.status.status !== 'loading') {
+      lighterWhisperAfterCrash();
       this.status = { status: 'loading', progress: 0, detail: 'Téléchargement de Whisper…' };
       this.emit();
       // Téléphone : processeur. Le GPU mobile donne des transcriptions fausses avec le décodeur 4 bits,
@@ -569,9 +797,9 @@ function listenWebSpeech(opts: ListenOptions): ListenHandle {
     rejectFn = rej;
   });
 
-  // Indicateur de niveau micro (purement visuel)
+  // Indicateur de niveau micro (purement visuel) ; pas sur iPhone (une seule capture, voir pageCapturesMic).
   const mic = new MicCapture();
-  if (opts.onLevel) {
+  if (opts.onLevel && pageCapturesMic()) {
     mic.start((_, rms) => opts.onLevel!(Math.min(1, rms * 12))).catch(() => undefined);
   }
 
@@ -597,6 +825,7 @@ function listenWebSpeech(opts: ListenOptions): ListenHandle {
     }
   };
   rec.onend = () => {
+    lastRecEnd = performance.now();
     cleanup();
     if (!failed) resolveFn(aborted ? '' : text.trim());
   };
@@ -679,12 +908,20 @@ function listenWhisper(opts: ListenOptions): ListenHandle {
       if (whisper.status.status !== 'ready') await whisper.load();
       if (whisper.status.status !== 'ready') throw new Error(whisper.status.detail || 'Whisper indisponible');
       if (finished) return;
-      await mic.start((pcm, rms) => {
-        if (finished) return;
-        opts.onLevel?.(Math.min(1, rms * 12));
-        seg?.push(pcm, rms);
-        if (!heard && performance.now() - started > noSpeechMs) void done(null);
-      });
+      await mic.start(
+        (pcm, rms) => {
+          if (finished) return;
+          opts.onLevel?.(Math.min(1, rms * 12));
+          seg?.push(pcm, rms);
+          if (!heard && performance.now() - started > noSpeechMs) void done(null);
+        },
+        (why) => {
+          if (finished) return;
+          finished = true;
+          mic.stop();
+          rejectFn(new Error(`Le micro ne répond pas (${why}). Réessayez.`));
+        },
+      );
       started = performance.now();
       seg = new Segmenter({
         sampleRate: mic.sampleRate,
@@ -773,6 +1010,10 @@ export class ContinuousListener {
   private recSession = false;
   /** Démarrage de la reconnaissance en cours (journal : délai avant les premiers mots). */
   private recStartedAt = 0;
+  /** Temps écoulé entre la fin de la reconnaissance précédente et le démarrage de celle-ci. */
+  private recGap = Infinity;
+  /** Réouvertures, pendant cette écoute, d'un micro resté sans son (Whisper). */
+  private micRetries = 0;
   private quietTimer: number | undefined;
   /** Relances d'une écoute restée sourde (une seule par écoute). */
   private quietRestarts = 0;
@@ -812,8 +1053,22 @@ export class ContinuousListener {
       if (this.engine === 'whisper') await this.startWhisper();
       else await this.startWebSpeech();
     } catch (err) {
+      // iPhone : Whisper n'a pas pu se charger (le micro, lui, n'est pas en cause) : la reconnaissance
+      // du navigateur, qui entend au moins la première réponse.
+      let error = err;
+      if (this.running && this.engine === 'whisper' && whisper.status.status !== 'ready' && isIOS() && webSpeechSupported()) {
+        journal(`Whisper indisponible (${String((err as Error)?.message ?? err).slice(0, 60)}) : reconnaissance du navigateur`);
+        noticeListeners.forEach((l) => l(WHISPER_FAILED_MSG));
+        this.engine = 'webspeech';
+        try {
+          await this.startWebSpeech();
+          return;
+        } catch (e2) {
+          error = e2;
+        }
+      }
       this.stop();
-      this.ev.onError?.(micErrorMessage(err));
+      this.ev.onError?.(micErrorMessage(error));
     }
   }
 
@@ -834,6 +1089,7 @@ export class ContinuousListener {
     this.wsText = '';
     this.wsInterim = '';
     this.ring = [];
+    if (this.rec) lastRecEnd = performance.now();
     try {
       this.rec?.abort();
     } catch {
@@ -860,6 +1116,7 @@ export class ContinuousListener {
     if (!this.paused) return;
     this.paused = false;
     this.quietRestarts = 0;
+    this.micRetries = 0;
     if (!this.running) return;
     if (this.engine === 'webspeech') this.restartRec();
     if (this.release && this.ready && !this.mic && this.captureNeeded()) {
@@ -909,17 +1166,20 @@ export class ContinuousListener {
     const mic = new MicCapture();
     const whisperMode = this.engine === 'whisper';
     const opening = mic
-      .start((pcm, rms) => {
-        if (this.mic !== mic || !this.running || this.paused) return;
-        this.ev.onLevel?.(Math.min(1, rms * 12));
-        if (whisperMode) {
-          this.seg?.push(pcm, rms);
-        } else {
-          const now = performance.now();
-          this.ring.push({ t: now, pcm });
-          while (this.ring.length && now - this.ring[0].t > 30000) this.ring.shift();
-        }
-      })
+      .start(
+        (pcm, rms) => {
+          if (this.mic !== mic || !this.running || this.paused) return;
+          this.ev.onLevel?.(Math.min(1, rms * 12));
+          if (whisperMode) {
+            this.seg?.push(pcm, rms);
+          } else {
+            const now = performance.now();
+            this.ring.push({ t: now, pcm });
+            while (this.ring.length && now - this.ring[0].t > 30000) this.ring.shift();
+          }
+        },
+        (why) => this.micDead(mic, why),
+      )
       .then(() => {
         // Refermé (pause, arrêt) pendant l'ouverture : on relâche aussitôt.
         if (gen !== this.micGen || !this.running || (this.paused && this.release)) {
@@ -949,6 +1209,53 @@ export class ContinuousListener {
     this.mic = null;
     this.seg = null;
     this.holdSession(false);
+  }
+
+  /**
+   * Micro resté sans son (lecteur de capture bloqué, piste rendue muette ou coupée par iOS) : avec
+   * Whisper, réouvert une fois pendant l'écoute, puis erreur (un toucher sur le micro le relance).
+   * Avec la reconnaissance du navigateur, ce n'est que l'indicateur de niveau : il est abandonné.
+   */
+  private micDead(mic: MicCapture, why: string) {
+    if (this.mic !== mic || !this.running) return;
+    this.closeMic();
+    if (this.engine !== 'whisper' || (this.paused && this.release)) return;
+    if (this.micRetries++ < 1) {
+      journal('micro : réouverture');
+      this.ev.onState?.('loading', 'réouverture du micro');
+      this.ensureMic()
+        .then(() => {
+          if (this.running && !this.paused) this.ev.onState?.('listening');
+        })
+        .catch((err) => {
+          this.stop();
+          this.ev.onError?.(micErrorMessage(err));
+        });
+      return;
+    }
+    this.stop();
+    this.ev.onError?.(`Le micro ne répond pas (${why}). Touchez le micro pour réessayer.`);
+  }
+
+  /** Bascule durable sur Whisper : service du navigateur injoignable, ou reconnaissance sourde sur iPhone. */
+  private switchToWhisper(msg: string) {
+    const old = this.rec;
+    this.rec = null;
+    try {
+      old?.abort();
+    } catch {
+      /* ignore */
+    }
+    window.clearInterval(this.recTimer);
+    window.clearTimeout(this.quietTimer);
+    this.closeMic();
+    this.ready = false;
+    fallbackToWhisper(msg);
+    this.engine = 'whisper';
+    void this.startWhisper().catch((err) => {
+      this.stop();
+      this.ev.onError?.(micErrorMessage(err));
+    });
   }
 
   /** L'apprenant indique qu'il a fini sa phrase. */
@@ -998,7 +1305,10 @@ export class ContinuousListener {
       sampleRate: mic.sampleRate,
       noise: this.noise,
       silenceMs: () => getState().settings.silenceMs,
-      onSpeechStart: () => this.ev.onState?.('hearing'),
+      onSpeechStart: () => {
+        this.micRetries = 0;
+        this.ev.onState?.('hearing');
+      },
       onPartial: (chunks) => {
         if (this.interimBusy || whisper.slow) return;
         this.interimBusy = true;
@@ -1078,18 +1388,28 @@ export class ContinuousListener {
       if (rec === this.rec) journal(`reconnaissance du navigateur : micro actif (${Math.round(performance.now() - this.recStartedAt)} ms)`);
     };
     // Écoute qui n'entend rien : noté au journal (silence ou micro muet ?), puis une relance avec
-    // une reconnaissance neuve. Sur iOS, une reconnaissance peut rester sourde sans aucune erreur.
+    // une reconnaissance neuve. Sur iOS, une reconnaissance relancée peu après la précédente reste
+    // sourde sans aucune erreur (voir IOS_REC_COOLDOWN_MS) : bascule sur Whisper, qui capte lui-même.
     window.clearTimeout(this.quietTimer);
+    const soon = isIOS() && performance.now() - lastRecEnd < IOS_REC_COOLDOWN_MS;
+    const quietMs = soon ? IOS_DEAF_MS : QUIET_NOTE_MS;
     this.quietTimer = window.setTimeout(() => {
       if (rec !== this.rec || heard || !this.running || this.paused) return;
+      if (soon && whisper.status.status !== 'error' && interruptedLoads('whisper').count < 2) {
+        journal(
+          `reconnaissance du navigateur : rien entendu en ${quietMs / 1000} s, relancée ${Math.round(this.recGap / 1000)} s après la précédente (iOS la laisse sourde) : passage à Whisper`,
+        );
+        this.switchToWhisper(IOS_DEAF_MSG);
+        return;
+      }
       const retry = this.quietRestarts < 1;
       journal(
-        `reconnaissance du navigateur : rien entendu en ${QUIET_NOTE_MS / 1000} s (micro ${audioOn ? 'actif' : 'jamais signalé actif'})${retry ? ', relance' : ''}`,
+        `reconnaissance du navigateur : rien entendu en ${quietMs / 1000} s (micro ${audioOn ? 'actif' : 'jamais signalé actif'})${retry ? ', relance' : ''}`,
       );
       if (!retry) return;
       this.quietRestarts++;
       this.restartRec();
-    }, QUIET_NOTE_MS);
+    }, quietMs);
     rec.onresult = (e: any) => {
       if (this.paused || rec !== this.rec) return;
       if (!heard) {
@@ -1110,16 +1430,7 @@ export class ContinuousListener {
       journal(`reconnaissance du navigateur : erreur « ${e.error ?? '?'} »`);
       if (e.error === 'network' || e.error === 'service-not-allowed' || e.error === 'language-not-supported') {
         // Service en ligne injoignable : bascule définitive sur Whisper, micro toujours ouvert.
-        this.rec = null;
-        window.clearInterval(this.recTimer);
-        this.closeMic();
-        this.ready = false;
-        fallbackToWhisper();
-        this.engine = 'whisper';
-        void this.startWhisper().catch((err) => {
-          this.stop();
-          this.ev.onError?.(micErrorMessage(err));
-        });
+        this.switchToWhisper(NETWORK_FALLBACK_MSG);
       } else if (e.error === 'not-allowed') {
         this.stop();
         this.ev.onError?.('Micro refusé : autorisez l’accès au microphone dans votre navigateur.');
@@ -1127,6 +1438,7 @@ export class ContinuousListener {
     };
     // Chrome arrête la reconnaissance après un moment : on la relance tant que le micro est actif.
     rec.onend = () => {
+      lastRecEnd = performance.now();
       if (rec !== this.rec) return;
       journal('reconnaissance du navigateur : terminée');
       // Android arrête la reconnaissance après chaque phrase : on garde ce qui a été dit avant de relancer.
@@ -1140,8 +1452,10 @@ export class ContinuousListener {
       if (!this.captureNeeded()) this.holdSession(true);
       try {
         this.recStartedAt = performance.now();
+        this.recGap = this.recStartedAt - lastRecEnd;
         rec.start();
-        journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
+        const gap = isIOS() && this.recGap < IOS_REC_COOLDOWN_MS ? `, ${Math.round(this.recGap / 1000)} s après la précédente` : '';
+        journal(`reconnaissance du navigateur : démarrée (${rec.lang}${gap})`);
       } catch (err) {
         journal(`reconnaissance du navigateur : démarrage refusé (${String(err).slice(0, 60)})`);
       }

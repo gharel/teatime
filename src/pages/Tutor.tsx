@@ -15,6 +15,7 @@ import {
   ContinuousListener,
   listen,
   pageCapturesMic,
+  primeMicCapture,
   resolveSttEngine,
   webSpeechSupported,
   whisper,
@@ -238,8 +239,10 @@ export default function Tutor() {
       const st = tts.neural.status;
       if (getState().settings.ttsEngine !== 'system' && (st === 'idle' || st === 'loading')) return;
       started = true;
+      // iPhone : Whisper est le seul moteur d'écoute fiable (voir stt.ts) : téléchargé ici au premier
+      // passage, avant « Commencer » (le bouton attend, avec la progression).
       void whisperCached().then((cached) => {
-        if (cached && whisper.status.status === 'idle') void whisper.load();
+        if ((cached || isIOS()) && whisper.status.status === 'idle') void whisper.load();
       });
     };
     tryStart();
@@ -463,6 +466,7 @@ function StartButton({ onStart }: { onStart: () => void }) {
       className="btn primary lg block"
       onClick={() => {
         tts.unlockAudio();
+        primeMicCapture();
         onStart();
       }}
     >
@@ -520,7 +524,8 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
   // Activité en cours, retrouvée au démarrage suivant si l'onglet est tué (mémoire) en pleine conversation.
   useEffect(() => {
     const what = { idle: 'en attente', listening: 'écoute', thinking: 'Emma réfléchit', speaking: 'Emma parle' }[state];
-    setActivity(`conversation (${what}${micState === 'transcribing' ? ', transcription' : ''})`);
+    // « Whisper » : un plantage pendant son écoute allège le modèle au démarrage suivant (iPhone, voir stt.ts).
+    setActivity(`conversation (${what}${micState === 'transcribing' ? ', transcription' : ''}${resolveSttEngine() === 'whisper' ? ', Whisper' : ''})`);
   }, [state, micState]);
   useEffect(() => {
     journal(`conversation : ${{ idle: 'en attente', listening: 'écoute', thinking: 'Emma réfléchit', speaking: 'Emma parle' }[state]}`);
@@ -591,6 +596,8 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
     setMicOn(on);
     setError('');
     if (on) {
+      // Toucher du micro : le lecteur de capture (Whisper, iPhone) démarre pendant le geste.
+      primeMicCapture();
       const l = getListener();
       const emmaBusy = busy.current || tts.isSpeaking;
       if (emmaBusy) l.pause();
