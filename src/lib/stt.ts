@@ -249,6 +249,8 @@ class MicCapture {
     }
     this.openedAt = performance.now();
     this.lastSound = this.openedAt;
+    // Lecteur de la voix resté figé à la réponse précédente : la page capte, un neuf peut démarrer.
+    tts.renewAfterStall();
     this.ctx = captureContext();
     captureUsers++;
     let running = await this.connect(this.ctx, onChunk);

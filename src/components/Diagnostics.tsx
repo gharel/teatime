@@ -3,7 +3,7 @@
  * dépannage (iPhone) et journal, avec un bouton pour tout copier.
  * ------------------------------------------------------------------ */
 import { useEffect, useRef, useState } from 'react';
-import { diagnosticSections, diagnosticText, recentCrash, type Tone } from '../lib/diagnostics';
+import { diagnosticSections, diagnosticText, journalText, recentCrash, type Tone } from '../lib/diagnostics';
 import { DEBUG_FLAGS, debugFlags, isIOS, setDebugFlag } from '../lib/device';
 import { clearJournal, journal, journalEntries, journalTime, onJournal } from '../lib/journal';
 import { traceTime } from '../lib/recover';
@@ -53,6 +53,30 @@ function copyAsync(text: string): Promise<boolean> {
 
 /** Boutons « Copier le diagnostic » et « Partager », avec le texte à sélectionner en dernier recours. */
 export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { className?: string }) {
+  return <CopyTextButton className={className} label="Copier le diagnostic" what="diagnostic" getText={diagnosticText} />;
+}
+
+/**
+ * « Copier le journal » : le journal seul, à tout moment (pendant la conversation, sans plantage
+ * détecté), pour le coller tel quel.
+ */
+export function CopyJournalButton({ className = 'btn sm' }: { className?: string }) {
+  return <CopyTextButton className={className} label="Copier le journal" what="journal" getText={journalText} share={false} />;
+}
+
+function CopyTextButton({
+  className,
+  label,
+  what,
+  getText,
+  share = true,
+}: {
+  className: string;
+  label: string;
+  what: string;
+  getText: () => string;
+  share?: boolean;
+}) {
   const [state, setState] = useState<'idle' | 'copied' | 'manual'>('idle');
   const [text, setText] = useState('');
   const [selHint, setSelHint] = useState('');
@@ -68,26 +92,26 @@ export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { classN
       <button
         className={className}
         onClick={() => {
-          const t = diagnosticText();
+          const t = getText();
           setText(t);
           if (copyNow(t)) {
             setState('copied');
-            journal('diagnostic copié');
+            journal(`${what} copié`);
             return;
           }
           void copyAsync(t).then((ok) => {
             setState(ok ? 'copied' : 'manual');
-            journal(ok ? 'diagnostic copié (API)' : 'copie du diagnostic refusée : texte affiché');
+            journal(ok ? `${what} copié (API)` : `copie du ${what} refusée : texte affiché`);
           });
         }}
       >
-        <Icon name={state === 'copied' ? 'check' : 'copy'} size={16} /> {state === 'copied' ? 'Copié !' : 'Copier le diagnostic'}
+        <Icon name={state === 'copied' ? 'check' : 'copy'} size={16} /> {state === 'copied' ? 'Copié !' : label}
       </button>
-      {canShare && (
+      {share && canShare && (
         <button
           className="btn sm"
           onClick={() => {
-            void navigator.share({ title: 'Diagnostic Tea Time English', text: diagnosticText() }).catch(() => undefined);
+            void navigator.share({ title: 'Diagnostic Tea Time English', text: getText() }).catch(() => undefined);
           }}
         >
           <Icon name="share" size={16} /> Partager
@@ -112,7 +136,7 @@ export function CopyDiagnosticsButton({ className = 'btn primary sm' }: { classN
                 } catch {
                   ok = false;
                 }
-                journal(ok ? 'diagnostic copié (texte sélectionné)' : 'diagnostic sélectionné, copie à faire à la main');
+                journal(ok ? `${what} copié (texte sélectionné)` : `${what} sélectionné, copie à faire à la main`);
                 setSelHint(ok ? 'Copié !' : 'Tout est sélectionné : touchez le texte puis « Copier » dans la bulle.');
               }}
             >
@@ -163,6 +187,7 @@ export function DiagnosticsPanel() {
 
       <div className="diag-actions">
         <CopyDiagnosticsButton />
+        <CopyJournalButton />
         <button
           className="btn sm"
           onClick={() => {

@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useRef, type ComponentType } from 'react';
 import { useRoute, ToastZone, Confetti, navigate, notify, resolvedTheme, ThemeToggle } from './components/ui';
 import { onSttNotice } from './lib/stt';
 import { dueCards, useAppState, getState } from './lib/store';
-import { tts } from './lib/tts';
+import { onTtsNotice, tts } from './lib/tts';
 import { autoReload } from './lib/recover';
 import Home from './pages/Home';
 import Icon, { type IconName } from './components/Icon';
@@ -111,8 +111,11 @@ export default function App() {
   // Bascule automatique de reconnaissance vocale (ex. service en ligne injoignable) : on prévient l'apprenant.
   useEffect(() => {
     const un = onSttNotice((msg) => notify('mic', msg, 6000));
+    // Lecteur de la voix bloqué (iPhone) : un toucher le rétablit.
+    const unTts = onTtsNotice((msg) => notify('speaker', msg, 8000));
     return () => {
       un();
+      unTts();
     };
   }, []);
 
