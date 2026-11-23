@@ -769,6 +769,8 @@ export class ContinuousListener {
   private micRate = 48000;
   /** Session audio « enregistrement » tenue pour la reconnaissance du navigateur seule (iPhone). */
   private recSession = false;
+  /** Démarrage de la reconnaissance en cours (journal : délai avant les premiers mots). */
+  private recStartedAt = 0;
   private levelTimer: number | undefined;
   engine: 'webspeech' | 'whisper' = resolveSttEngine();
 
@@ -835,11 +837,14 @@ export class ContinuousListener {
     return this.engine === 'whisper' || !isIOS();
   }
 
-  /** Session audio iOS « enregistrement » le temps de la reconnaissance du navigateur seule. */
+  /**
+   * Session audio iOS « play-and-record » le temps de la reconnaissance du navigateur seule : en
+   * « auto », WebKit ne compte pas sa capture et elle n'entendait rien (voir device.ts).
+   */
   private holdSession(on: boolean) {
     if (on === this.recSession) return;
     this.recSession = on;
-    if (on) beginCaptureAudioSession();
+    if (on) beginCaptureAudioSession('play-and-record');
     else endCaptureAudioSession();
   }
 
@@ -1017,8 +1022,16 @@ export class ContinuousListener {
     rec.lang = getState().settings.sttLang;
     rec.continuous = true;
     rec.interimResults = true;
+    let heard = false;
+    rec.onaudiostart = () => {
+      if (rec === this.rec) journal(`reconnaissance du navigateur : micro actif (${Math.round(performance.now() - this.recStartedAt)} ms)`);
+    };
     rec.onresult = (e: any) => {
       if (this.paused || rec !== this.rec) return;
+      if (!heard) {
+        heard = true;
+        journal(`reconnaissance du navigateur : premiers mots ${((performance.now() - this.recStartedAt) / 1000).toFixed(1).replace('.', ',')} s après le démarrage`);
+      }
       // Début d'énoncé : les résultats arrivent avec ~1 s de retard sur la voix.
       if (!this.wsText && !this.wsInterim) this.wsStart = performance.now() - 1500;
       this.wsInterim = webSpeechText(e.results);
@@ -1058,13 +1071,14 @@ export class ContinuousListener {
     };
     const begin = () => {
       if (rec !== this.rec || !this.running || this.paused) return;
-      // iOS : session audio « auto » avant d'écouter (jamais « play-and-record » forcé).
+      // iOS : session audio « play-and-record » avant d'écouter (voir holdSession).
       if (!this.captureNeeded()) this.holdSession(true);
       try {
+        this.recStartedAt = performance.now();
         rec.start();
         journal(`reconnaissance du navigateur : démarrée (${rec.lang})`);
-      } catch {
-        /* déjà démarrée */
+      } catch (err) {
+        journal(`reconnaissance du navigateur : démarrage refusé (${String(err).slice(0, 60)})`);
       }
     };
     // iOS : lecteur de la voix en pause avant le changement de session audio (voir parkForCapture).
