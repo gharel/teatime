@@ -27,7 +27,7 @@ export const DEBUG_FLAGS: { id: DebugFlag; label: string; hint: string }[] = [
   {
     id: 'noAudioSession',
     label: 'Ne pas changer la session audio iOS',
-    hint: 'Par défaut : « playback » pour la voix, « play-and-record » pour le micro.',
+    hint: 'Par défaut : « playback » pour la voix, « auto » pour le micro.',
   },
   {
     id: 'noContextRelaunch',
@@ -89,8 +89,9 @@ export function isIOS(): boolean {
  * Par défaut, iOS range le son Web Audio dans la catégorie « ambient » : il est coupé
  * quand l'iPhone est en mode silencieux (bouton latéral) — la voix d'Emma devient
  * muette alors que le reste fonctionne. L'API Audio Session (WebKit, iOS 16.4+)
- * permet de demander la catégorie « playback ». Pendant l'écoute, il faut
- * « play-and-record », posé AVANT getUserMedia (sinon iOS baisse le volume).
+ * permet de demander la catégorie « playback ». Avant l'écoute, on revient à « auto » :
+ * WebKit choisit lui-même la catégorie d'enregistrement. On ne force jamais
+ * « play-and-record » (forcé, il accompagnait les plantages de la page sur iPhone).
  * Sans cette API (autres navigateurs), ces fonctions ne font rien.
  */
 
@@ -103,7 +104,7 @@ function audioSession(): { type: string } | undefined {
   return (navigator as Navigator & { audioSession?: { type: string } }).audioSession;
 }
 
-function setAudioSessionType(type: 'playback' | 'play-and-record') {
+function setAudioSessionType(type: 'playback' | 'auto') {
   try {
     const session = audioSession();
     if (!session || session.type === type) return;
@@ -133,10 +134,10 @@ export function setPlaybackAudioSession() {
   if (activeCaptures === 0) setAudioSessionType('playback');
 }
 
-/** Avant d'ouvrir le micro. */
+/** Avant d'ouvrir le micro : « auto », WebKit passe seul en enregistrement (jamais forcé). */
 export function beginCaptureAudioSession() {
   activeCaptures++;
-  setAudioSessionType('play-and-record');
+  setAudioSessionType('auto');
 }
 
 /** Micro refermé. */

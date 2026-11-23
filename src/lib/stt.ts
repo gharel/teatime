@@ -99,8 +99,8 @@ class MicCapture {
   private session = false;
 
   async start(onChunk: (pcm: Float32Array, rms: number) => void) {
-    // iOS : catégorie « play-and-record » posée avant d'ouvrir le micro (sinon la voix d'Emma
-    // passe à mi-volume ou dans l'écouteur du haut).
+    // iOS : session audio rendue à « auto » avant d'ouvrir le micro (WebKit choisit la catégorie
+    // d'enregistrement), « playback » à la fermeture.
     if (!this.session) {
       await tts.parkForCapture();
       this.session = true;
@@ -1058,7 +1058,7 @@ export class ContinuousListener {
     };
     const begin = () => {
       if (rec !== this.rec || !this.running || this.paused) return;
-      // iOS : catégorie « play-and-record » avant d'écouter (la page ne capte pas le micro elle-même).
+      // iOS : session audio « auto » avant d'écouter (jamais « play-and-record » forcé).
       if (!this.captureNeeded()) this.holdSession(true);
       try {
         rec.start();

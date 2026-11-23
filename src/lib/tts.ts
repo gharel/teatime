@@ -777,8 +777,8 @@ class TtsService {
 
   /**
    * iPhone : met le lecteur de la voix en pause avant d'ouvrir le micro ; il reprend à la phrase
-   * suivante d'Emma, micro refermé. La session audio change alors de catégorie (playback ↔
-   * play-and-record) sans lecteur en marche : lecteur actif pendant ces changements puis relancé à
+   * suivante d'Emma, micro refermé. La session audio change alors de catégorie (playback ↔ auto,
+   * enregistrement) sans lecteur en marche : lecteur actif pendant ces changements puis relancé à
    * chaud, iOS tuait la page au tour suivant d'Emma.
    */
   async parkForCapture(): Promise<void> {
