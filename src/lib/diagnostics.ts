@@ -111,6 +111,14 @@ export function diagnosticSections(): DiagSection[] {
   ];
 }
 
+/** Journal seul, du plus ancien au plus récent (bouton « Copier le journal »). */
+export function journalText(): string {
+  const j = journalEntries();
+  const lines = [`Tea Time English · journal (${j.length} événements)`, `Version ${APP_VERSION} · copié le ${new Date().toLocaleString('fr-FR')}`, ''];
+  for (const e of j) lines.push(`${journalTime(e.t)} ${e.e}`);
+  return lines.join('\n');
+}
+
 /** Texte brut à coller tel quel (conversation, ticket…). */
 export function diagnosticText(): string {
   const lines = [`Tea Time English · diagnostic audio`, `Version ${APP_VERSION} · copié le ${new Date().toLocaleString('fr-FR')}`, ''];

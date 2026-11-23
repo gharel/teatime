@@ -33,7 +33,7 @@ import { semantic } from '../lib/semantic';
 import { sharedModelWorker } from '../lib/modelWorker';
 import { crashOnStartup, setActivity, traceTime } from '../lib/recover';
 import { eventsBeforeCrash, journal, journalTime } from '../lib/journal';
-import { CopyDiagnosticsButton } from '../components/Diagnostics';
+import { CopyDiagnosticsButton, CopyJournalButton } from '../components/Diagnostics';
 import { addSrsCards, claimQuests, getState, reward, updateSettings, useAppState, type LlmProvider } from '../lib/store';
 import { LevelBadge, navigate, notify, notifyBadges, Rich, sfx, useService } from '../components/ui';
 import Icon, { ICONS, IconBadge, topicIcon } from '../components/Icon';
@@ -408,6 +408,11 @@ export default function Tutor() {
           <p className="tiny muted center">
             Astuce : utilisez un casque ou des écouteurs pour éviter que le micro n'entende la voix d'Emma.
           </p>
+          {isIOS() && (
+            <div className="row" style={{ justifyContent: 'center' }}>
+              <CopyJournalButton className="btn ghost sm" />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -534,12 +539,15 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
 
   /** Lit une suite de phrases en mettant à jour les sous-titres. */
   const speakQueue = useRef<Promise<void>>(Promise.resolve());
+  /** Caractères confiés à la voix depuis la dernière attente (durée maximale de la lecture). */
+  const queuedChars = useRef(0);
   const enqueueSpeech = (text: string) => {
     setState('speaking');
     // Le micro reste ouvert mais ignore ce qu'il capte pendant qu'Emma parle (pas d'écho).
     listener.current?.pause();
     // Une phrase = un job TTS : la voix démarre plus tôt et les sous-titres suivent phrase par phrase.
     for (const sentence of splitSentences(text)) {
+      queuedChars.current += sentence.length;
       const p = tts.speak(sentence, rate);
       const prev = speakQueue.current;
       void prev.then(() => {
@@ -550,7 +558,23 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
   };
 
   const waitSpeech = async () => {
-    await speakQueue.current;
+    // Filet : une lecture qui ne finit jamais (lecteur audio bloqué sur iPhone) ne doit pas figer la
+    // conversation sur « Emma parle ». Large : génération comprise, ≈ 120 ms par caractère + 15 s.
+    const capMs = 15_000 + queuedChars.current * 120;
+    queuedChars.current = 0;
+    let timer: number | undefined;
+    const stuck = await Promise.race([
+      speakQueue.current.then(() => false),
+      new Promise<boolean>((r) => {
+        timer = window.setTimeout(() => r(true), capMs);
+      }),
+    ]);
+    window.clearTimeout(timer);
+    if (stuck) {
+      journal(`voix : lecture toujours en cours après ${Math.round(capMs / 1000)} s, abandonnée (Emma reprend l’écoute)`);
+      tts.stop();
+      speakQueue.current = Promise.resolve();
+    }
     // laisse finir l'écho éventuel de la pièce avant d'ouvrir le micro
     await new Promise((r) => setTimeout(r, 250));
   };
@@ -924,6 +948,11 @@ function Conversation({ session, onExit }: { session: TutorSession; onExit: () =
             <button className="btn sm" onClick={() => listener.current?.flush()}>
               ⏎ J'ai fini ma phrase
             </button>
+          )}
+          {isIOS() && (
+            <div className="row center" style={{ justifyContent: 'center' }}>
+              <CopyJournalButton className="btn ghost sm" />
+            </div>
           )}
           {error && (
             <p className="small center" style={{ color: 'var(--danger)' }}>

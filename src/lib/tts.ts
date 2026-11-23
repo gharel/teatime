@@ -43,6 +43,21 @@ const AFTER_CAPTURE_MS = 450;
 const IDLE_RELEASE_MS = 20_000;
 /** Délai minimal entre l'arrêt d'un moteur de voix et la création du suivant (mémoire rendue d'abord). */
 const RECREATE_GAP_MS = 1500;
+/**
+ * Horloge du lecteur immobile pendant ce délai alors qu'il est « running » et qu'une phrase est
+ * programmée : il ne joue plus rien (iPhone, 24/11, juste après la fermeture du micro : trois
+ * phrases programmées, aucune jouée, conversation figée sur « Emma parle »).
+ */
+const CLOCK_STALL_MS = 1500;
+
+/* ------------------------------ Avis (son bloqué) ------------------------------ */
+
+const noticeListeners = new Set<(msg: string) => void>();
+/** Avis à afficher à l'apprenant (lecteur audio bloqué : un toucher le rétablit). */
+export function onTtsNotice(cb: (msg: string) => void) {
+  noticeListeners.add(cb);
+  return () => noticeListeners.delete(cb);
+}
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
 
@@ -219,6 +234,12 @@ class TtsService {
   private relaunching = false;
   /** Le lecteur audio a déjà tourné (iOS : déverrouillé par un geste). */
   private audioUnlocked = false;
+  /** Surveillance de l'horloge du lecteur pendant qu'une phrase est programmée (voir CLOCK_STALL_MS). */
+  private clockTimer: number | undefined;
+  private clockMark = { t: 0, ct: 0 };
+  private clockStalls = 0;
+  /** Lecteur resté figé malgré une relance : un neuf est créé au prochain toucher (seul moment où iOS le laisse démarrer). */
+  private renewOnGesture = false;
   /** Pages qui gardent le moteur de voix chargé (page Emma, conversation). */
   private holders = 0;
   private idleTimer: number | undefined;
@@ -248,6 +269,10 @@ class TtsService {
     // quand le micro s'ouvre, après un appel, Siri… : chaque toucher relance ce qui doit l'être.
     const onGesture = () => {
       this.primeSystemSpeech();
+      if (this.renewOnGesture) {
+        this.renewContext('toucher');
+        return;
+      }
       // Pas pendant l'écoute : le lecteur y est en pause exprès (voir parkForCapture). Sur iPhone,
       // une fois déverrouillé, il n'est repris ici que si Emma a quelque chose à dire : le toucher
       // du bouton du micro le relançait pendant l'écoute (speak() le reprend de toute façon).
@@ -756,12 +781,17 @@ class TtsService {
     src.connect(this.analyser);
     // iPhone : micro tout juste refermé, on laisse iOS revenir sur le haut-parleur.
     const afterCapture = releaseMicWhileSpeaking() ? Math.max(0, AFTER_CAPTURE_MS - msSinceCaptureEnd()) / 1000 : 0;
+    // Aucune phrase en cours mais tête de lecture loin devant : la phrase partirait dans le vide.
+    if (this.playHead > ctx.currentTime + 1 && ![...this.pending.values()].some((q) => q.sources.length > 0 && q.lastEnd > ctx.currentTime)) {
+      this.note(`voix : tête de lecture ${(this.playHead - ctx.currentTime).toFixed(1).replace('.', ',')} s en avance sans phrase en cours, recalée`);
+      this.playHead = 0;
+    }
     const startAt = Math.max(ctx.currentTime + 0.03, ctx.currentTime + afterCapture, this.playHead);
     if (!p.sources.length) {
       this.note(
-        `voix ${this.neuralModel ?? '?'} : phrase de ${(buf.duration).toFixed(1).replace('.', ',')} s, contexte ${ctx.state}, sortie ${ctx.sampleRate} Hz${
-          captureActive() ? ', micro ouvert' : ''
-        }`,
+        `voix ${this.neuralModel ?? '?'} : phrase de ${(buf.duration).toFixed(1).replace('.', ',')} s, contexte ${ctx.state}, départ dans ${(startAt - ctx.currentTime)
+          .toFixed(1)
+          .replace('.', ',')} s, sortie ${ctx.sampleRate} Hz${captureActive() ? ', micro ouvert' : ''}`,
       );
     }
     // Trou audible : la phrase précédente était finie avant que celle-ci soit prête.
@@ -782,13 +812,108 @@ class TtsService {
     lipsync.setAnalyser(this.analyser);
     lipsync.schedule(ipaToVisemes(c.phonemes), perfStart, buf.duration * 1000, 60);
     src.onended = () => this.maybeResolve(c.id);
+    this.watchClock();
+  }
+
+  /** Une phrase est programmée : l'horloge du lecteur doit avancer (voir CLOCK_STALL_MS). */
+  private watchClock() {
+    const ctx = this.audioCtx;
+    if (!ctx || this.clockTimer !== undefined) return;
+    this.clockMark = { t: performance.now(), ct: ctx.currentTime };
+    this.clockTimer = window.setInterval(() => this.checkClock(), 500);
+  }
+
+  private checkClock() {
+    const ctx = this.audioCtx;
+    if (!ctx || ![...this.pending.values()].some((p) => p.sources.length > 0)) {
+      window.clearInterval(this.clockTimer);
+      this.clockTimer = undefined;
+      return;
+    }
+    const now = performance.now();
+    // Suspendu, interrompu, en relance ou page masquée : pas une panne d'horloge.
+    if (ctx.state !== 'running' || this.relaunching || document.hidden || ctx.currentTime > this.clockMark.ct + 0.01) {
+      this.clockMark = { t: now, ct: ctx.currentTime };
+      return;
+    }
+    if (now - this.clockMark.t < CLOCK_STALL_MS) return;
+    this.clockMark = { t: now, ct: ctx.currentTime };
+    this.clockStalls++;
+    if (this.clockStalls === 1) {
+      this.note(`lecteur audio : horloge figée depuis ${String(CLOCK_STALL_MS / 1000).replace('.', ',')} s (running, phrase programmée), relance`);
+      this.relaunching = true;
+      window.setTimeout(() => (this.relaunching = false), 1500);
+      void ctx
+        .suspend()
+        .then(() => ctx.resume())
+        .then(() => this.note('lecteur audio : relancé'))
+        .catch((err) => this.note(`lecteur audio : relance en échec (${String(err).slice(0, 60)})`))
+        .finally(() => (this.relaunching = false));
+      return;
+    }
+    // Toujours figé : la conversation reprend (réponse affichée), lecteur neuf au prochain toucher.
+    this.note('lecteur audio : toujours figé après la relance, phrases abandonnées (lecteur neuf au prochain toucher)');
+    this.renewOnGesture = true;
+    noticeListeners.forEach((l) => l('Le son d’Emma s’est bloqué : touchez l’écran pour le rétablir.'));
+    this.stop();
+  }
+
+  /**
+   * Micro tout juste ouvert après un blocage du lecteur : la page capte, iOS laisse donc démarrer un
+   * lecteur neuf sans toucher. S'il ne démarre pas, un toucher s'en chargera.
+   */
+  renewAfterStall() {
+    if (!this.renewOnGesture) return;
+    this.renewContext('micro ouvert');
+    const ctx = this.audioCtx;
+    if (!ctx) return;
+    void (async () => {
+      for (let i = 0; i < 6 && ctx.state !== 'running'; i++) {
+        await Promise.race([ctx.resume().catch(() => undefined), new Promise((r) => window.setTimeout(r, 350))]);
+      }
+      if (ctx !== this.audioCtx) return;
+      if (ctx.state !== 'running') {
+        this.note(`lecteur audio : lecteur neuf resté ${ctx.state}, nouvel essai au prochain toucher`);
+        this.renewOnGesture = true;
+      } else if (captureActive() && this.speakingCount === 0) {
+        void ctx.suspend();
+      }
+    })();
+  }
+
+  /**
+   * Lecteur neuf, pendant un toucher (iOS ne laisse démarrer qu'à ce moment-là un lecteur créé sans
+   * micro ouvert) : remplace celui resté figé. Micro ouvert, il est remis en pause jusqu'à la
+   * prochaine phrase d'Emma (voir parkForCapture).
+   */
+  private renewContext(why: string) {
+    this.renewOnGesture = false;
+    const old = this.audioCtx;
+    this.audioCtx = null;
+    this.analyser = null;
+    this.playHead = 0;
+    this.clockStalls = 0;
+    if (old) void old.close().catch(() => undefined);
+    this.note(`lecteur audio : lecteur neuf après un blocage (${why})`);
+    const ctx = this.unlockAudio();
+    if (ctx && captureActive()) {
+      void ctx
+        .resume()
+        .then(() => {
+          if (captureActive() && this.speakingCount === 0 && ctx === this.audioCtx) void ctx.suspend();
+        })
+        .catch(() => undefined);
+    }
   }
 
   private maybeResolve(id: number) {
     const p = this.pending.get(id);
     if (!p || !p.done || p.staged > 0 || !this.audioCtx) return;
     if (this.audioCtx.currentTime + 0.02 >= p.lastEnd) {
-      if (p.sources.length) this.note('voix : fin de lecture');
+      if (p.sources.length) {
+        this.note('voix : fin de lecture');
+        this.clockStalls = 0;
+      }
       this.pending.delete(id);
       this.speakingCount = Math.max(0, this.speakingCount - 1);
       p.resolve();
@@ -965,6 +1090,8 @@ class TtsService {
     this.pending.clear();
     this.staged = [];
     window.clearTimeout(this.flushTimer);
+    window.clearInterval(this.clockTimer);
+    this.clockTimer = undefined;
     this.speakingCount = 0;
     this.playHead = 0;
     lipsync.clear();

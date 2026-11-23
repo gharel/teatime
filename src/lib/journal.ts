@@ -13,7 +13,8 @@ export interface JournalEntry {
 }
 
 const KEY = 'teatime:journal';
-const MAX = 80;
+/** Assez pour plusieurs tours de conversation (≈ 25 lignes par tour sur iPhone). */
+const MAX = 200;
 
 function load(): JournalEntry[] {
   try {
