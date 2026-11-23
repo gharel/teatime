@@ -217,6 +217,8 @@ class TtsService {
   private manualLoad = false;
   /** Pause puis reprise du lecteur en cours (iOS, après fermeture du micro). */
   private relaunching = false;
+  /** Le lecteur audio a déjà tourné (iOS : déverrouillé par un geste). */
+  private audioUnlocked = false;
   /** Pages qui gardent le moteur de voix chargé (page Emma, conversation). */
   private holders = 0;
   private idleTimer: number | undefined;
@@ -246,8 +248,11 @@ class TtsService {
     // quand le micro s'ouvre, après un appel, Siri… : chaque toucher relance ce qui doit l'être.
     const onGesture = () => {
       this.primeSystemSpeech();
-      // Pas pendant l'écoute : le lecteur y est en pause exprès (voir parkForCapture).
-      if (this.audioCtx && this.audioCtx.state !== 'running' && !captureActive()) {
+      // Pas pendant l'écoute : le lecteur y est en pause exprès (voir parkForCapture). Sur iPhone,
+      // une fois déverrouillé, il n'est repris ici que si Emma a quelque chose à dire : le toucher
+      // du bouton du micro le relançait pendant l'écoute (speak() le reprend de toute façon).
+      const idle = isIOS() && this.audioUnlocked && this.speakingCount === 0;
+      if (this.audioCtx && this.audioCtx.state !== 'running' && !captureActive() && !idle) {
         setPlaybackAudioSession();
         void this.audioCtx.resume().catch(() => undefined);
       }
@@ -384,7 +389,10 @@ class TtsService {
         this.audioCtx = ctx;
         this.analyser = analyser;
         this.note(`lecteur audio créé (${ctx.state}, ${ctx.sampleRate} Hz)`);
-        ctx.onstatechange = () => this.note(`lecteur audio : ${ctx.state}`);
+        ctx.onstatechange = () => {
+          if (ctx.state === 'running') this.audioUnlocked = true;
+          this.note(`lecteur audio : ${ctx.state}`);
+        };
       } catch (err) {
         this.note(`lecteur audio : création impossible (${String(err).slice(0, 60)})`);
         return null;
