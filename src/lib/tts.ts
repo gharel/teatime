@@ -36,6 +36,13 @@ export type NeuralModel = 'kokoro' | 'piper';
  * session d'appel (« play-and-record ») : une voix lancée trop tôt part dans l'écouteur.
  */
 const AFTER_CAPTURE_MS = 450;
+/**
+ * iPhone : moteur de voix arrêté après ce délai sans usage (ni phrase, ni page qui le garde), pour
+ * rendre sa mémoire WASM ; il repart à la phrase suivante. Jamais pendant une conversation.
+ */
+const IDLE_RELEASE_MS = 20_000;
+/** Délai minimal entre l'arrêt d'un moteur de voix et la création du suivant (mémoire rendue d'abord). */
+const RECREATE_GAP_MS = 1500;
 
 export type LoadStatus = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
 
@@ -200,6 +207,17 @@ class TtsService {
   private manualLoad = false;
   /** Pause puis reprise du lecteur en cours (iOS, après fermeture du micro). */
   private relaunching = false;
+  /** Pages qui gardent le moteur de voix chargé (page Emma, conversation). */
+  private holders = 0;
+  private idleTimer: number | undefined;
+  /** Moteur arrêté faute d'usage (iPhone) : relancé à la prochaine phrase. */
+  private asleep: { model: NeuralModel; device: 'wasm' | 'webgpu' } | null = null;
+  /** Moteur en train de repartir après une mise en veille : les phrases l'attendent. */
+  private waking = false;
+  private lastTerminate = -Infinity;
+  /** Messages pour un worker dont la création attend (le précédent rend sa mémoire). */
+  private outbox: unknown[] | null = null;
+  private startToken = 0;
   /** Surveillance d'un chargement qui ne progresse plus. */
   private watched: EngineStatus | null = null;
   private stallTimer: number | undefined;
@@ -282,8 +300,10 @@ class TtsService {
   /** Échec du chargement de la voix : erreur affichée, worker libéré, page rechargée une fois. */
   private loadFailed(detail: string, why: string) {
     if (this.neural.status === 'loading' && this.neuralModel) endLoad(this.neuralModel);
-    this.worker?.terminate();
-    this.worker = null;
+    // Phrases en attente d'un moteur qui ne viendra pas : Emma ne doit pas rester bloquée.
+    if (this.pending.size) this.stop();
+    this.waking = false;
+    this.terminateWorker();
     this.neural = { status: 'error', progress: 0, detail };
     this.note(`voix : ${why.slice(0, 90)}`);
     this.emit();
@@ -301,7 +321,7 @@ class TtsService {
 
   /** La voix neuronale est chargée et assez rapide (ou gardée malgré sa lenteur). */
   neuralUsable(): boolean {
-    if (this.neural.status !== 'ready' || !this.worker) return false;
+    if (this.neural.status !== 'ready' || (!this.worker && !this.outbox && !this.asleep)) return false;
     if (this.neuralModel === 'piper') return true;
     return !this.kokoroTooSlow || getState().settings.kokoroEvenIfSlow;
   }
@@ -464,8 +484,9 @@ class TtsService {
   /** Recharge la voix neuronale (changement de réglage : Kokoro, Piper…). */
   reloadNeural() {
     this.stop();
-    this.worker?.terminate();
-    this.worker = null;
+    this.asleep = null;
+    this.waking = false;
+    this.terminateWorker();
     if (this.neural.status === 'loading' && this.neuralModel) endLoad(this.neuralModel);
     this.neuralModel = null;
     this.neural = { status: 'idle', progress: 0 };
@@ -474,24 +495,104 @@ class TtsService {
   }
 
   private startWorker(model: NeuralModel, device: 'wasm' | 'webgpu') {
-    this.worker?.terminate();
+    this.terminateWorker();
     this.neuralModel = model;
     this.tracker = new ProgressTracker();
     beginLoad(model, device);
     // Sur GPU la génération est 3 à 5× plus rapide que la parole ; sur CPU elle peut être plus lente.
     this.rtf = model === 'piper' ? 0.5 : device === 'webgpu' ? 0.3 : 1;
-    this.worker = openModelWorker(model === 'piper' ? 'piper' : 'tts');
-    this.worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
-    this.worker.onerror = (e) => {
-      endLoad(model);
-      this.loadFailed(friendlyLoadError(e.message || 'Erreur du worker'), `erreur du worker : ${e.message || '?'}`);
+    const token = ++this.startToken;
+    const create = () => {
+      if (token !== this.startToken) return;
+      const queued = this.outbox ?? [];
+      this.outbox = null;
+      const worker = openModelWorker(model === 'piper' ? 'piper' : 'tts');
+      this.worker = worker;
+      worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
+      worker.onerror = (e) => {
+        endLoad(model);
+        this.loadFailed(friendlyLoadError(e.message || 'Erreur du worker'), `erreur du worker : ${e.message || '?'}`);
+      };
+      worker.postMessage({ type: 'load', engine: model, device });
+      // Phrases demandées pendant l'attente : le worker les calcule dès la voix chargée.
+      queued.forEach((m) => worker.postMessage(m));
     };
-    this.worker.postMessage({ type: 'load', engine: model, device });
+    // Un moteur vient d'être arrêté : on lui laisse le temps de rendre sa mémoire avant d'en créer
+    // un autre (deux tas WASM à la fois, c'est ce qui fait tuer la page sur iPhone).
+    const wait = RECREATE_GAP_MS - (performance.now() - this.lastTerminate);
+    if (wait > 0) {
+      this.outbox = [];
+      this.note(`voix : nouveau moteur dans ${Math.round(wait)} ms (le précédent rend sa mémoire)`);
+      window.setTimeout(create, wait);
+    } else {
+      create();
+    }
+  }
+
+  /** Arrête le moteur de voix (et une création en attente). */
+  private terminateWorker() {
+    window.clearTimeout(this.idleTimer);
+    this.startToken++;
+    this.outbox = null;
+    if (!this.worker) return;
+    this.worker.terminate();
+    this.worker = null;
+    this.lastTerminate = performance.now();
+  }
+
+  /** Envoie un message au moteur de voix (ou le garde pour le moteur en cours de création). */
+  private send(msg: unknown) {
+    if (this.outbox) this.outbox.push(msg);
+    else this.worker?.postMessage(msg);
+  }
+
+  /**
+   * Garde le moteur de voix chargé tant que la fonction renvoyée n'est pas appelée : page Emma et
+   * conversation (le même worker sert toute la conversation). Le réveille s'il était en veille.
+   */
+  hold(): () => void {
+    this.holders++;
+    window.clearTimeout(this.idleTimer);
+    this.wake();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.holders = Math.max(0, this.holders - 1);
+      this.armIdle();
+    };
+  }
+
+  /** iPhone : programme l'arrêt du moteur après IDLE_RELEASE_MS sans usage. */
+  private armIdle() {
+    window.clearTimeout(this.idleTimer);
+    if (!isIOS() || this.holders > 0 || this.speakingCount > 0 || !this.worker || this.neural.status !== 'ready') return;
+    this.idleTimer = window.setTimeout(() => this.sleep(), IDLE_RELEASE_MS);
+  }
+
+  private sleep() {
+    if (this.holders > 0 || this.speakingCount > 0 || !this.worker || this.neural.status !== 'ready' || !this.neuralModel) return;
+    this.asleep = { model: this.neuralModel, device: this.neuralModel === 'kokoro' ? (this.kokoroDevice ?? 'wasm') : 'wasm' };
+    this.terminateWorker();
+    this.note(`voix : moteur arrêté après ${IDLE_RELEASE_MS / 1000} s sans usage (mémoire rendue)`);
+    this.emit();
+  }
+
+  /** Relance le moteur mis en veille (les phrases demandées l'attendent). */
+  private wake() {
+    const a = this.asleep;
+    if (!a) return;
+    this.asleep = null;
+    this.waking = true;
+    this.note('voix : réveil du moteur');
+    this.startWorker(a.model, a.device);
   }
 
   private onWorker(msg: any) {
     switch (msg.type) {
       case 'progress': {
+        // Réveil après une veille : la voix reste « prête » (les phrases attendent le moteur).
+        if (this.waking) break;
         const p = this.tracker.update(msg.p ?? {});
         const mb = this.tracker.totalMB();
         const name = this.neuralModel === 'piper' ? 'Voix neuronale légère' : 'Voix neuronale';
@@ -505,6 +606,7 @@ class TtsService {
       case 'ready': {
         const model: NeuralModel = msg.engine === 'piper' ? 'piper' : 'kokoro';
         endLoad(model);
+        this.waking = false;
         this.neuralThreads = typeof msg.threads === 'number' ? msg.threads : null;
         const rtf = typeof msg.rtf === 'number' && Number.isFinite(msg.rtf) ? (msg.rtf as number) : null;
         if (rtf !== null) this.rtf = rtf;
@@ -530,8 +632,7 @@ class TtsService {
             writeSpeed('piper', rtf);
           }
           if (rtf !== null && rtf > piperMaxRtf() && s.ttsEngine !== 'piper') {
-            this.worker?.terminate();
-            this.worker = null;
+            this.terminateWorker();
             this.neural = { status: 'unsupported', progress: 0, detail: slowDetail(rtf) };
             this.note(`Piper trop lente (${fmtRtf(rtf)}) : voix du système`);
             this.emit();
@@ -541,6 +642,7 @@ class TtsService {
         }
         this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}${heapNote(msg.heap)}`);
         this.emit();
+        this.armIdle();
         break;
       }
       case 'error':
@@ -664,6 +766,7 @@ class TtsService {
       this.speakingCount = Math.max(0, this.speakingCount - 1);
       p.resolve();
       this.emit();
+      this.armIdle();
     }
   }
 
@@ -691,7 +794,9 @@ class TtsService {
     const clean = cleanForSpeech(text);
     if (!clean) return Promise.resolve();
     const s = getState().settings;
-    const useNeural = s.ttsEngine !== 'system' && this.neuralUsable() && !!this.unlockAudio();
+    const useNeural = s.ttsEngine !== 'system' && (this.waking || this.neuralUsable()) && !!this.unlockAudio();
+    window.clearTimeout(this.idleTimer);
+    if (useNeural) this.wake();
     this.note(`voix : phrase demandée (${clean.length} car., ${useNeural ? this.neuralModel : 'voix du système'})`);
     this.speakingCount++;
     this.emit();
@@ -708,12 +813,13 @@ class TtsService {
           receivedMs: 0,
           staged: 0,
         });
-        this.worker!.postMessage({ type: 'speak', id, text: clean, voice: s.kokoroVoice, speed: rate });
+        this.send({ type: 'speak', id, text: clean, voice: s.kokoroVoice, speed: rate });
       });
     }
     return this.speakSystem(clean, rate).finally(() => {
       this.speakingCount = Math.max(0, this.speakingCount - 1);
       this.emit();
+      this.armIdle();
     });
   }
 
@@ -795,7 +901,9 @@ class TtsService {
       },
       {
         label: 'Voix neuronale',
-        value: `${{ idle: 'pas chargée', loading: 'chargement', ready: 'prête', error: 'erreur', unsupported: 'trop lente ici' }[n.status] ?? n.status}${n.detail ? ` · ${n.detail}` : ''}`,
+        value: this.asleep
+          ? `en veille (moteur arrêté après ${IDLE_RELEASE_MS / 1000} s sans usage, relancé à la prochaine phrase)`
+          : `${{ idle: 'pas chargée', loading: 'chargement', ready: 'prête', error: 'erreur', unsupported: 'trop lente ici' }[n.status] ?? n.status}${this.waking ? ' · réveil du moteur' : ''}${n.detail ? ` · ${n.detail}` : ''}`,
         tone: n.status === 'ready' ? 'ok' : n.status === 'loading' || n.status === 'idle' ? 'warn' : 'bad',
       },
       {
@@ -811,7 +919,7 @@ class TtsService {
   stop() {
     if ('speechSynthesis' in window) speechSynthesis.cancel();
     const ids = [...this.pending.keys()];
-    if (ids.length) this.worker?.postMessage({ type: 'cancel', ids });
+    if (ids.length) this.send({ type: 'cancel', ids });
     this.pending.forEach((p) => {
       p.sources.forEach((s) => {
         try {
@@ -829,6 +937,7 @@ class TtsService {
     this.playHead = 0;
     lipsync.clear();
     this.emit();
+    this.armIdle();
   }
 }
 

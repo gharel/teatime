@@ -225,6 +225,9 @@ export default function Tutor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Un seul moteur de voix pour toute la page et la conversation (iPhone : jamais arrêté ici).
+  useEffect(() => tts.hold(), []);
+
   // iPhone (moteur partagé, un seul thread) : Whisper s'initialise juste après la voix, avant la
   // conversation ; sinon son initialisation (plusieurs secondes) couperait Emma en pleine phrase.
   useEffect(() => {
