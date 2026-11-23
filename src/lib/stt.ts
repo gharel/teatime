@@ -771,6 +771,24 @@ export class ContinuousListener {
   private recSession = false;
   /** Démarrage de la reconnaissance en cours (journal : délai avant les premiers mots). */
   private recStartedAt = 0;
+  /**
+   * Écoute suspendue parce que la page est masquée (autre appli, écran verrouillé), reprise au
+   * retour : en arrière-plan, iOS coupe la capture (« audio-capture »), la reconnaissance rendait
+   * des bribes tardives auxquelles Emma répondait, et iOS tuait la page pendant sa réponse.
+   */
+  private hiddenPause = false;
+  private readonly onVisibility = () => {
+    if (!this.running) return;
+    if (document.hidden) {
+      if (this.paused) return;
+      this.hiddenPause = true;
+      this.pauseNow('page masquée');
+    } else if (this.hiddenPause) {
+      this.hiddenPause = false;
+      journal('page visible : reprise de l’écoute');
+      this.resumeNow();
+    }
+  };
   private levelTimer: number | undefined;
   engine: 'webspeech' | 'whisper' = resolveSttEngine();
 
@@ -784,6 +802,7 @@ export class ContinuousListener {
     if (this.running) return;
     this.running = true;
     this.engine = resolveSttEngine();
+    document.addEventListener('visibilitychange', this.onVisibility);
     try {
       if (this.engine === 'whisper') await this.startWhisper();
       else await this.startWebSpeech();
@@ -794,9 +813,17 @@ export class ContinuousListener {
   }
 
   pause() {
+    // Pause demandée (Emma parle…) : pas de reprise automatique au retour sur la page.
+    this.hiddenPause = false;
+    this.pauseNow();
+  }
+
+  private pauseNow(why?: string) {
     if (this.paused) return;
     this.paused = true;
-    journal(`écoute en pause${this.rec ? ' (reconnaissance du navigateur arrêtée)' : ''}${this.release ? ', micro refermé' : ''}`);
+    journal(
+      `écoute ${why ? `suspendue (${why})` : 'en pause'}${this.rec ? ' (reconnaissance du navigateur arrêtée)' : ''}${this.release ? ', micro refermé' : ''}`,
+    );
     this.seg?.reset();
     this.wsText = '';
     this.wsInterim = '';
@@ -812,6 +839,18 @@ export class ContinuousListener {
   }
 
   resume() {
+    if (!this.paused) return;
+    if (this.running && document.hidden) {
+      // Pas d'écoute en arrière-plan : elle reprendra au retour sur la page.
+      if (!this.hiddenPause) journal('écoute reportée : page masquée');
+      this.hiddenPause = true;
+      return;
+    }
+    this.hiddenPause = false;
+    this.resumeNow();
+  }
+
+  private resumeNow() {
     if (!this.paused) return;
     this.paused = false;
     if (!this.running) return;
@@ -914,6 +953,8 @@ export class ContinuousListener {
   stop() {
     this.running = false;
     this.ready = false;
+    this.hiddenPause = false;
+    document.removeEventListener('visibilitychange', this.onVisibility);
     window.clearInterval(this.recTimer);
     window.clearTimeout(this.levelTimer);
     try {
