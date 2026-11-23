@@ -5,7 +5,7 @@
  */
 import { isNetworkError, retryOnNetworkError } from '../lib/download';
 import type { Port } from './port';
-import { heapMB } from './wasmHeap';
+import { heapBytes, heapMB, heapParts } from './wasmHeap';
 
 export type Device = 'wasm' | 'webgpu';
 export type Engine = 'kokoro' | 'piper';
@@ -84,7 +84,7 @@ export function serveSynth(port: Port, make: SynthFactories) {
     } catch {
       /* sans gravité */
     }
-    post({ type: 'ready', engine, device: used, threads: synth.threads, rtf, heap: heapMB() });
+    post({ type: 'ready', engine, device: used, threads: synth.threads, rtf, heap: heapMB(), heapParts: heapParts() });
   }
 
   async function drain() {
@@ -96,9 +96,11 @@ export function serveSynth(port: Port, make: SynthFactories) {
       }
       try {
         let t = performance.now();
+        let before = heapBytes();
         for await (const chunk of synth!.stream(job.text, job.speed, job.voice)) {
           if (cancelled.has(job.id) || disposed) break;
           const genMs = performance.now() - t;
+          const after = heapBytes();
           post(
             {
               type: 'chunk',
@@ -109,10 +111,13 @@ export function serveSynth(port: Port, make: SynthFactories) {
               chars: chunk.text.length,
               genMs,
               heap: heapMB(),
+              heapParts: heapParts(),
+              heapGrowMB: Math.round(((after - before) / 1048576) * 10) / 10,
             },
             [chunk.audio.buffer],
           );
           t = performance.now();
+          before = after;
         }
       } catch (err) {
         post({ type: 'speak-error', id: job.id, error: String(err) });

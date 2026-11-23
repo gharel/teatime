@@ -20,6 +20,16 @@ try {
   Patched.prototype = Memory.prototype;
   (WebAssembly as { Memory: typeof WebAssembly.Memory }).Memory = Patched;
 
+  // Instanciation synchrone (repli d'Emscripten) : la mémoire exportée est suivie aussi.
+  const Instance = WebAssembly.Instance;
+  const PatchedInstance = function (this: unknown, module: WebAssembly.Module, imports?: WebAssembly.Imports) {
+    const inst = new Instance(module, imports);
+    Object.values(inst.exports ?? {}).forEach(track);
+    return inst;
+  } as unknown as typeof WebAssembly.Instance;
+  PatchedInstance.prototype = Instance.prototype;
+  (WebAssembly as { Instance: typeof WebAssembly.Instance }).Instance = PatchedInstance;
+
   for (const name of ['instantiate', 'instantiateStreaming'] as const) {
     const orig = WebAssembly[name] as (...a: unknown[]) => Promise<unknown>;
     if (typeof orig !== 'function') continue;
@@ -36,5 +46,18 @@ try {
 
 /** Mémoire WASM totale du worker, en Mo. */
 export function heapMB(): number {
-  return Math.round(memories.reduce((a, m) => a + m.buffer.byteLength, 0) / 1048576);
+  return Math.round(heapBytes() / 1048576);
+}
+
+/** Taille réelle (octets) de toutes les mémoires WASM du worker : buffer.byteLength, qui ne fait que grandir. */
+export function heapBytes(): number {
+  return memories.reduce((a, m) => a + m.buffer.byteLength, 0);
+}
+
+/** Taille de chaque mémoire WASM du worker (onnxruntime, eSpeak…), en Mo, la plus grosse d'abord. */
+export function heapParts(): number[] {
+  return memories
+    .map((m) => Math.round((m.buffer.byteLength / 1048576) * 10) / 10)
+    .filter((mb) => mb > 0)
+    .sort((a, b) => b - a);
 }

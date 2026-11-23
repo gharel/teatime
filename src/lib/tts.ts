@@ -24,7 +24,7 @@ import {
 import { friendlyLoadError } from './download';
 import { openModelWorker, type ModelWorker } from './modelWorker';
 import { autoReload } from './recover';
-import { heapNote, journal } from './journal';
+import { journal } from './journal';
 import { estimateSpeechMs, ipaToVisemes, lipsync, textToVisemes } from './lipsync';
 import { PIPER_CACHE, PIPER_VOICE } from './piper';
 import { getState } from './store';
@@ -170,6 +170,14 @@ export async function webgpuAvailable(): Promise<boolean> {
   }
 }
 
+/** « 207 Mo (190 + 17), +35 Mo à la dernière phrase » : mémoire WASM réelle du moteur de voix. */
+function fmtWasm(w: { mb: number; parts: number[]; grow: number | null }): string {
+  const mb = (n: number) => `${n}`.replace('.', ',');
+  const split = w.parts.length > 1 ? ` (${w.parts.map(mb).join(' + ')})` : '';
+  const grow = w.grow === null ? '' : w.grow > 0 ? `, +${mb(w.grow)} Mo à la dernière phrase` : ', stable à la dernière phrase';
+  return `${w.mb} Mo${split}${grow}`;
+}
+
 class TtsService {
   /** Voix neuronale (Kokoro ou Piper selon l'appareil). */
   neural: EngineStatus = { status: 'idle', progress: 0 };
@@ -197,6 +205,8 @@ class TtsService {
   kokoroRtf: number | null = null;
   /** Vitesse mesurée de Piper, si connue. */
   piperRtf: number | null = null;
+  /** Mémoire WASM réelle du moteur de voix (dernière mesure, détail par tas, pic, croissance à la dernière phrase). */
+  wasm: { mb: number; parts: number[]; peak: number; grow: number | null } | null = null;
   /** Threads de calcul du worker de voix. */
   neuralThreads: number | null = null;
   private tracker = new ProgressTracker();
@@ -640,7 +650,7 @@ class TtsService {
           }
           this.neural = { status: 'ready', progress: 1, detail: 'Voix neuronale légère prête' };
         }
-        this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}${heapNote(msg.heap)}`);
+        this.note(`voix ${model} prête${rtf !== null ? ` (vitesse ${fmtRtf(rtf)})` : ''}${this.measureWasm(msg)}`);
         this.emit();
         this.armIdle();
         break;
@@ -654,7 +664,7 @@ class TtsService {
         this.note(`erreur de synthèse : ${String(msg.error).slice(0, 80)}`);
         break;
       case 'chunk':
-        this.onChunk(msg.id, msg.audio, msg.sampleRate, msg.phonemes, msg.chars ?? 0, msg.genMs ?? 0, msg.heap);
+        this.onChunk(msg.id, msg.audio, msg.sampleRate, msg.phonemes, msg.chars ?? 0, msg.genMs ?? 0, this.measureWasm(msg));
         break;
       case 'done': {
         const p = this.pending.get(msg.id);
@@ -670,11 +680,20 @@ class TtsService {
   /** Statistiques de fluidité (diagnostic) : génération vs durée audio, trous entre phrases. */
   stats: { genMs: number; durMs: number; gapMs: number; waitMs: number }[] = [];
 
-  private onChunk(id: number, audio: Float32Array, sampleRate: number, phonemes: string, chars: number, genMs: number, heap?: number) {
+  /** Mémoire WASM réelle envoyée par le worker (« ready », chaque phrase) ; texte pour le journal. */
+  private measureWasm(msg: { heap?: unknown; heapParts?: unknown; heapGrowMB?: unknown }): string {
+    if (typeof msg.heap !== 'number' || msg.heap <= 0) return '';
+    const parts = Array.isArray(msg.heapParts) ? (msg.heapParts as number[]) : [];
+    const grow = typeof msg.heapGrowMB === 'number' ? msg.heapGrowMB : null;
+    this.wasm = { mb: msg.heap, parts, peak: Math.max(this.wasm?.peak ?? 0, msg.heap), grow };
+    return ` · mémoire WASM réelle ${fmtWasm(this.wasm)}`;
+  }
+
+  private onChunk(id: number, audio: Float32Array, sampleRate: number, phonemes: string, chars: number, genMs: number, wasm: string) {
     const p = this.pending.get(id);
     if (!p || !this.audioCtx) return;
     const durMs = (audio.length / sampleRate) * 1000;
-    this.note(`voix : phrase calculée en ${Math.round(genMs)} ms (${(durMs / 1000).toFixed(1).replace('.', ',')} s d’audio)${heapNote(heap)}`);
+    this.note(`voix : phrase calculée en ${Math.round(genMs)} ms (${(durMs / 1000).toFixed(1).replace('.', ',')} s d’audio, ${chars} car.)${wasm}`);
     if (durMs > 200) {
       this.rtf = this.rtf * 0.6 + (genMs / durMs) * 0.4;
       if (chars > 0) this.msPerChar = this.msPerChar * 0.7 + (durMs / chars) * 0.3;
@@ -912,6 +931,11 @@ class TtsService {
         tone: !ctx ? undefined : ctx.state === 'running' ? 'ok' : 'warn',
       },
       { label: 'Threads de la voix', value: `${this.neuralThreads ?? '?'}` },
+      {
+        label: 'Mémoire WASM de la voix',
+        value: this.wasm ? `${fmtWasm(this.wasm)} · pic ${this.wasm.peak} Mo` : 'pas encore mesurée',
+        tone: this.wasm && this.wasm.peak > 300 ? 'warn' : undefined,
+      },
     ];
   }
 
