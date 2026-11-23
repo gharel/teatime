@@ -21,5 +21,10 @@ declare module 'onnxruntime-web' {
       options?: { executionProviders?: string[]; graphOptimizationLevel?: 'disabled' | 'basic' | 'extended' | 'all' },
     ): Promise<InferenceSession>;
   };
-  export const env: { wasm: { wasmPaths?: string | Record<string, string>; numThreads?: number } };
+  export const env: { wasm: { wasmPaths?: string | { mjs?: string; wasm?: string }; numThreads?: number } };
+}
+
+/** Build WASM simple (sans JSEP/WebGPU ni asyncify) : même API. */
+declare module 'onnxruntime-web/wasm' {
+  export * from 'onnxruntime-web';
 }

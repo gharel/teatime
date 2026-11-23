@@ -7,7 +7,10 @@
  */
 import { env } from '@huggingface/transformers';
 import { KokoroTTS, TextSplitterStream } from 'kokoro-js';
-import * as ort from 'onnxruntime-web';
+// Build WASM simple d'onnxruntime-web (1.22) pour Piper : l'import par défaut charge le build JSEP
+// (WebGPU, asyncify, ≈ 21,6 Mo de WASM contre 11,1 Mo), inutile ici et plus lourd en mémoire sur iPhone.
+import * as ort from 'onnxruntime-web/wasm';
+import ortWasmUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm?url';
 import { phonemize } from 'phonemizer';
 import { isNetworkError, retryOnNetworkError } from '../lib/download';
 import {
@@ -152,9 +155,9 @@ async function piperPhonemes(text: string, lang: string): Promise<string> {
 }
 
 async function createPiper(progress: Progress): Promise<Synth> {
-  // Même emplacement des fichiers WASM que Transformers.js (déjà en cache du navigateur).
-  if (wasmEnv?.wasmPaths && !ort.env.wasm.wasmPaths) ort.env.wasm.wasmPaths = wasmEnv.wasmPaths as string;
-  if (wasmEnv?.numThreads) ort.env.wasm.numThreads = wasmEnv.numThreads;
+  // Fichier WASM du build simple, servi avec l'appli (le bundle ne le retrouve pas seul après Vite).
+  ort.env.wasm.wasmPaths = { wasm: ortWasmUrl };
+  ort.env.wasm.numThreads = 1;
   // Petit fichier d'abord : la progression affichée porte sur le modèle.
   const cfg = JSON.parse(new TextDecoder().decode(await fetchCached(PIPER_VOICE.config, progress))) as PiperConfig;
   const model = await fetchCached(PIPER_VOICE.model, progress);
@@ -246,7 +249,7 @@ export function serveTts(port: Port) {
     } catch {
       /* sans gravité */
     }
-    post({ type: 'ready', engine, device: used, threads: wasmEnv?.numThreads ?? 1, rtf, heap: heapMB() });
+    post({ type: 'ready', engine, device: used, threads: engine === 'piper' ? 1 : (wasmEnv?.numThreads ?? 1), rtf, heap: heapMB() });
   }
 
   async function drain() {
