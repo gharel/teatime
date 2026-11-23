@@ -1,8 +1,7 @@
 /// <reference lib="webworker" />
 /*
- * Voix légère Piper seule dans son worker, sur tous les appareils : un onnxruntime en build WASM
- * simple, 1 thread, sans Transformers.js. Sur iPhone, son tas mémoire ne se mélange plus à celui
- * de la compréhension (worker partagé).
+ * Voix légère Piper seule dans son worker (ordinateur, Android) : un onnxruntime en build WASM simple,
+ * 1 thread, sans Transformers.js. Sur iPhone, elle tourne dans le worker partagé (models.worker.ts).
  */
 import './wasmHeap';
 import { createPiper } from './piper.core';

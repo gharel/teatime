@@ -1,14 +1,11 @@
 /// <reference lib="webworker" />
 /*
  * Piper (MIT, VITS), voix légère : calcul local, une phrase à la fois.
- * Seul dans son worker (piper.worker.ts) : son propre onnxruntime en build WASM simple, sans
- * Transformers.js ni kokoro-js, pour une mémoire minimale sur iPhone.
+ * Build WASM simple d'onnxruntime-web (voir ortPlain.ts) : seul dans son worker (piper.worker.ts)
+ * sur ordinateur et Android ; sur iPhone, dans le worker partagé, avec le même runtime que la
+ * compréhension et Whisper.
  */
-// Build WASM simple d'onnxruntime-web (1.22) : l'import par défaut charge le build JSEP
-// (WebGPU, asyncify, ≈ 21,6 Mo de WASM contre 11,1 Mo), inutile ici et plus lourd en mémoire sur iPhone.
-import * as ort from 'onnxruntime-web/wasm';
-import ortMjsUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs?url';
-import ortWasmUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm?url';
+import { ort, usePlainOrt } from './ortPlain';
 import { phonemize } from 'phonemizer';
 import {
   normalizePeak,
@@ -111,10 +108,7 @@ async function createSession(progress: Progress): Promise<ort.InferenceSession> 
 }
 
 export async function createPiper(progress: Progress): Promise<Synth> {
-  // Fichiers du build simple (module d'amorçage + WASM), servis avec l'appli : le bundle les cherche à
-  // côté de lui, où Vite ne les met pas.
-  ort.env.wasm.wasmPaths = { mjs: ortMjsUrl, wasm: ortWasmUrl };
-  ort.env.wasm.numThreads = 1;
+  usePlainOrt();
   // Petit fichier d'abord : la progression affichée porte sur le modèle.
   const cfg = JSON.parse(new TextDecoder().decode(await fetchCached(PIPER_VOICE.config, progress))) as PiperConfig;
   const session = await createSession(progress);

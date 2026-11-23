@@ -11,6 +11,21 @@ export interface Port {
   close?(): void;
 }
 
+let lowMemory = false;
+
+/** Worker partagé (iPhone) : sessions Transformers.js sans réserve mémoire d'onnxruntime. */
+export function useLowMemorySessions() {
+  lowMemory = true;
+}
+
+/**
+ * Options de session Transformers.js : dans le worker partagé, ni arène ni plan mémoire (comme Piper),
+ * le tas WASM commun ne grandit que du nécessaire. Ailleurs, les réglages par défaut (plus rapides).
+ */
+export function sessionOptions(): { session_options?: object } {
+  return lowMemory ? { session_options: { enableCpuMemArena: false, enableMemPattern: false } } : {};
+}
+
 let tail: Promise<unknown> = Promise.resolve();
 /** Calculs urgents (voix, Whisper, réponse de l'apprenant) en file ou en cours. */
 let urgent = 0;

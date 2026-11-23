@@ -5,7 +5,7 @@
  * Service servi dans son propre worker (embed.worker.ts) ou dans le worker partagé (models.worker.ts).
  */
 import { pipeline, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import { exclusive, whenIdle, type Port } from './port';
+import { exclusive, sessionOptions, whenIdle, type Port } from './port';
 import { heapMB } from './wasmHeap';
 
 type Msg = { type: 'load' } | { type: 'embed'; id: number; texts: string[]; priority: boolean } | { type: 'dispose' };
@@ -26,6 +26,7 @@ export function serveEmbed(port: Port) {
     fe = await make('feature-extraction', MODEL, {
       device: 'wasm',
       dtype: 'q8',
+      ...sessionOptions(),
       progress_callback: (p: unknown) => post({ type: 'progress', p }),
     });
     post({ type: 'ready', heap: heapMB() });

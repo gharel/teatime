@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 /** Version affichée dans le diagnostic : commit + date du build (savoir ce qui tourne sur le téléphone). */
@@ -16,6 +16,28 @@ function appVersion(): string {
 }
 
 /**
+ * iPhone : un seul onnxruntime, en build WASM simple, pour tous les modèles (worker partagé, voir
+ * src/workers/ortPlain.ts). Transformers.js importe « onnxruntime-web » (build JSEP, pour WebGPU) :
+ * dans le bundle du worker partagé seulement, cet import est redirigé vers « onnxruntime-web/wasm »,
+ * le même module que celui de Piper. Les autres workers (ordinateur : Kokoro sur GPU) gardent JSEP.
+ */
+function plainOrtInSharedWorker(): Plugin {
+  let shared = false;
+  return {
+    name: 'teatime:plain-ort-shared-worker',
+    enforce: 'pre',
+    options(opts) {
+      shared = /models\.worker/.test(JSON.stringify(opts.input ?? ''));
+      return null;
+    },
+    resolveId(source, importer, options) {
+      if (!shared || source !== 'onnxruntime-web') return null;
+      return this.resolve('onnxruntime-web/wasm', importer, { ...options, skipSelf: true });
+    },
+  };
+}
+
+/**
  * COOP/COEP « credentialless » => crossOriginIsolated = true dans Chrome/Edge/Firefox :
  * active SharedArrayBuffer, donc le WASM multi-thread d'onnxruntime (Kokoro, Whisper)
  * tout en laissant charger les modèles depuis Hugging Face (CORS).
@@ -29,7 +51,8 @@ export default defineConfig({
   base: './',
   define: { __APP_VERSION__: JSON.stringify(appVersion()) },
   plugins: [react()],
-  worker: { format: 'es' },
+  // Une instance du plugin par bundle de worker (Vite appelle la fonction pour chacun).
+  worker: { format: 'es', plugins: () => [plainOrtInSharedWorker()] },
   server: { headers: isolationHeaders },
   preview: { headers: isolationHeaders },
   optimizeDeps: {

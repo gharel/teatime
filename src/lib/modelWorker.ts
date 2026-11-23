@@ -2,11 +2,12 @@
  * Workers des modèles (voix, Whisper, compréhension).
  *
  * Ordinateur, Android : un worker par modèle (calculs en parallèle).
- * iPhone / iPad : un seul worker partagé (sauf la voix légère Piper,
- * toujours dans le sien : voir openModelWorker). Chaque worker a son propre
- * onnxruntime, dont la mémoire WASM ne fait que grandir ; trois tas
- * séparés dépassaient la mémoire accordée à l'onglet par iOS, qui
- * le tuait (la page se rechargeait toute seule pendant la conversation).
+ * iPhone / iPad : un seul worker pour tous (voix Piper, compréhension,
+ * Whisper), avec un seul onnxruntime en build WASM simple (voir
+ * ortPlain.ts). Chaque runtime a son tas mémoire WASM, qui ne fait que
+ * grandir : iOS refusait d'allouer celui d'un second runtime (« RangeError:
+ * Out of memory », compréhension indisponible), et trois tas séparés
+ * dépassaient la mémoire accordée à l'onglet (la page était tuée).
  * Mesures sur PC : Whisper base 470 Mo + Piper 170 à 300 Mo + MiniLM
  * 75 Mo séparés, contre ≈ 520 Mo partagés.
  * ------------------------------------------------------------------ */
@@ -84,11 +85,7 @@ function shared(name: ModelService): ModelWorker {
   return worker;
 }
 
-/**
- * Ouvre le worker d'un service de modèle. La voix légère Piper a toujours le sien (build WASM simple
- * d'onnxruntime, 1 thread) : sur iPhone, l'onglet était tué pendant qu'Emma parlait alors qu'elle
- * partageait le tas mémoire de la compréhension.
- */
+/** Ouvre le worker d'un service de modèle (iPhone : un port du worker partagé). */
 export function openModelWorker(name: ModelService): ModelWorker {
-  return sharedModelWorker() && name !== 'piper' ? shared(name) : dedicated(name);
+  return sharedModelWorker() ? shared(name) : dedicated(name);
 }

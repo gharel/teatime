@@ -5,7 +5,7 @@
  */
 import { pipeline, type AutomaticSpeechRecognitionPipeline } from '@huggingface/transformers';
 import { languagePicker } from './whisperLang';
-import { exclusiveTimed, type Port } from './port';
+import { exclusiveTimed, sessionOptions, type Port } from './port';
 import { heapMB } from './wasmHeap';
 
 type Msg =
@@ -24,6 +24,7 @@ async function create(model: string, device: 'wasm' | 'webgpu', progress: (p: un
         ? { encoder_model: 'fp32', decoder_model_merged: 'q4' }
         : { encoder_model: /small|medium|large/i.test(model) ? 'q8' : 'fp32', decoder_model_merged: 'q8' },
     progress_callback: progress,
+    ...sessionOptions(),
   })) as AutomaticSpeechRecognitionPipeline;
 }
 
