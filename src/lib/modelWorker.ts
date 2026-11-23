@@ -2,7 +2,8 @@
  * Workers des modèles (voix, Whisper, compréhension).
  *
  * Ordinateur, Android : un worker par modèle (calculs en parallèle).
- * iPhone / iPad : un seul worker partagé. Chaque worker a son propre
+ * iPhone / iPad : un seul worker partagé (sauf la voix légère Piper,
+ * toujours dans le sien : voir openModelWorker). Chaque worker a son propre
  * onnxruntime, dont la mémoire WASM ne fait que grandir ; trois tas
  * séparés dépassaient la mémoire accordée à l'onglet par iOS, qui
  * le tuait (la page se rechargeait toute seule pendant la conversation).
@@ -11,7 +12,7 @@
  * ------------------------------------------------------------------ */
 import { isIOS } from './device';
 
-export type ModelService = 'tts' | 'stt' | 'embed';
+export type ModelService = 'tts' | 'piper' | 'stt' | 'embed';
 
 /** Ce que les services utilisent d'un worker (dédié, ou port du worker partagé). */
 export interface ModelWorker {
@@ -31,6 +32,8 @@ function dedicated(name: ModelService): Worker {
   switch (name) {
     case 'tts':
       return new Worker(new URL('../workers/tts.worker.ts', import.meta.url), { type: 'module' });
+    case 'piper':
+      return new Worker(new URL('../workers/piper.worker.ts', import.meta.url), { type: 'module' });
     case 'stt':
       return new Worker(new URL('../workers/stt.worker.ts', import.meta.url), { type: 'module' });
     default:
@@ -81,7 +84,11 @@ function shared(name: ModelService): ModelWorker {
   return worker;
 }
 
-/** Ouvre le worker d'un service de modèle. */
+/**
+ * Ouvre le worker d'un service de modèle. La voix légère Piper a toujours le sien (build WASM simple
+ * d'onnxruntime, 1 thread) : sur iPhone, l'onglet était tué pendant qu'Emma parlait alors qu'elle
+ * partageait le tas mémoire de la compréhension.
+ */
 export function openModelWorker(name: ModelService): ModelWorker {
-  return sharedModelWorker() ? shared(name) : dedicated(name);
+  return sharedModelWorker() && name !== 'piper' ? shared(name) : dedicated(name);
 }

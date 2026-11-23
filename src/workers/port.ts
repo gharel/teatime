@@ -5,18 +5,10 @@
  * Chaque service parle à son « port » : le worker lui-même (worker dédié), ou un MessagePort
  * quand plusieurs services partagent un même worker (iPhone, voir src/lib/modelWorker.ts).
  */
-import { env } from '@huggingface/transformers';
-
 export interface Port {
   postMessage(message: unknown, transfer: Transferable[]): void;
   onmessage: ((e: MessageEvent) => unknown) | null;
   close?(): void;
-}
-
-/** Threads WASM (seulement possible quand la page est isolée : SharedArrayBuffer). */
-export function setWasmThreads(n: number) {
-  const wasm = env.backends.onnx.wasm as { numThreads?: number } | undefined;
-  if (wasm && self.crossOriginIsolated) wasm.numThreads = Math.max(1, n);
 }
 
 let tail: Promise<unknown> = Promise.resolve();

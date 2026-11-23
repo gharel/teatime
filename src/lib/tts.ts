@@ -480,7 +480,7 @@ class TtsService {
     beginLoad(model, device);
     // Sur GPU la génération est 3 à 5× plus rapide que la parole ; sur CPU elle peut être plus lente.
     this.rtf = model === 'piper' ? 0.5 : device === 'webgpu' ? 0.3 : 1;
-    this.worker = openModelWorker('tts');
+    this.worker = openModelWorker(model === 'piper' ? 'piper' : 'tts');
     this.worker.onmessage = (e: MessageEvent) => this.onWorker(e.data);
     this.worker.onerror = (e) => {
       endLoad(model);

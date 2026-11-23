@@ -18,7 +18,12 @@ declare module 'onnxruntime-web' {
   export const InferenceSession: {
     create(
       model: Uint8Array,
-      options?: { executionProviders?: string[]; graphOptimizationLevel?: 'disabled' | 'basic' | 'extended' | 'all' },
+      options?: {
+        executionProviders?: string[];
+        graphOptimizationLevel?: 'disabled' | 'basic' | 'extended' | 'all';
+        enableCpuMemArena?: boolean;
+        enableMemPattern?: boolean;
+      },
     ): Promise<InferenceSession>;
   };
   export const env: { wasm: { wasmPaths?: string | { mjs?: string; wasm?: string }; numThreads?: number } };

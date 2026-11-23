@@ -98,3 +98,37 @@ export function normalizePeak(audio: Float32Array, peak = 0.9): Float32Array {
   for (let i = 0; i < audio.length; i++) audio[i] *= g;
   return audio;
 }
+
+/** Abréviations suivies d'un point qui ne terminent pas la phrase. */
+const ABBREVIATION = /(?:^|[\s(])(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|vs|etc|approx|e\.g|i\.e|a\.m|p\.m|U\.S|U\.K|No)\.$/i;
+
+/**
+ * Découpe un texte en phrases (Piper calcule une phrase à la fois : moins de mémoire, et Emma
+ * commence à parler dès la première). Les points des nombres (3.5), des abréviations (Mr., e.g.)
+ * et toute ponctuation suivie d'une minuscule ne coupent pas.
+ */
+export function splitSentences(text: string): string[] {
+  const s = text.replace(/\s+/g, ' ').trim();
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c !== '.' && c !== '!' && c !== '?' && c !== '…') continue;
+    let j = i + 1;
+    while (j < s.length && /[.!?…"'”’)\]]/.test(s[j])) j++;
+    // Pas d'espace après : nombre (3.5), sigle (U.S.A) ou fin de texte.
+    if (j < s.length && s[j] !== ' ') continue;
+    const sentence = s.slice(start, j).trim();
+    if (j < s.length) {
+      if (c === '.' && ABBREVIATION.test(sentence)) continue;
+      // Suite en minuscule : la phrase continue (« approx. ten », « well… maybe », « "Really?" she asked »).
+      if (/^[a-z]/.test(s.slice(j + 1))) continue;
+    }
+    if (sentence) out.push(sentence);
+    start = j;
+    i = j - 1;
+  }
+  const rest = s.slice(start).trim();
+  if (rest) out.push(rest);
+  return out;
+}

@@ -10,7 +10,8 @@ import './wasmHeap';
 import { serveTts } from './tts.core';
 import { serveStt } from './stt.core';
 import { serveEmbed } from './embed.core';
-import { setWasmThreads, type Port } from './port';
+import type { Port } from './port';
+import { setWasmThreads } from './wasmThreads';
 
 setWasmThreads(Math.min(8, (navigator.hardwareConcurrency || 4) - 2));
 

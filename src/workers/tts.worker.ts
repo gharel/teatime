@@ -2,7 +2,8 @@
 /* Synthèse vocale dans son propre worker (voir tts.core.ts). */
 import './wasmHeap';
 import { serveTts } from './tts.core';
-import { setWasmThreads, type Port } from './port';
+import type { Port } from './port';
+import { setWasmThreads } from './wasmThreads';
 
 // Par défaut onnxruntime n'utilise que 4 threads : on en prend davantage (en laissant de la marge au reste).
 setWasmThreads(Math.min(8, (navigator.hardwareConcurrency || 4) - 2));

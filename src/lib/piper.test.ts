@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizePeak, piperPhonemeIds, piperPunctuation, piperText, splitForPhonemes } from './piper';
+import { normalizePeak, piperPhonemeIds, piperPunctuation, piperText, splitForPhonemes, splitSentences } from './piper';
 
 const MAP: Record<string, number[]> = {
   _: [0],
@@ -60,5 +60,22 @@ describe('Piper : préparation du texte', () => {
     expect(Math.max(...Array.from(a, Math.abs))).toBeCloseTo(0.9, 5);
     // Silence : laissé tel quel (pas de division par zéro).
     expect(Array.from(normalizePeak(new Float32Array(3)))).toEqual([0, 0, 0]);
+  });
+});
+
+describe('Piper : découpage en phrases', () => {
+  it('coupe aux fins de phrase', () => {
+    expect(splitSentences('Hello Tom! How are you? I am fine.')).toEqual(['Hello Tom!', 'How are you?', 'I am fine.']);
+  });
+  it('garde les nombres, abréviations et suites en minuscule', () => {
+    expect(splitSentences('It costs 3.50 pounds. Ask Mr. Smith, e.g. tomorrow.')).toEqual([
+      'It costs 3.50 pounds.',
+      'Ask Mr. Smith, e.g. tomorrow.',
+    ]);
+    expect(splitSentences('Well… maybe. "Really?" she asked.')).toEqual(['Well… maybe.', '"Really?" she asked.']);
+  });
+  it('garde un texte sans ponctuation finale', () => {
+    expect(splitSentences('  Nice to meet you  ')).toEqual(['Nice to meet you']);
+    expect(splitSentences('')).toEqual([]);
   });
 });
