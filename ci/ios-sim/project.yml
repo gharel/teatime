@@ -1,0 +1,38 @@
+name: Harness
+options:
+  bundleIdPrefix: com.teatime
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  Harness:
+    type: application
+    platform: iOS
+    sources:
+      - path: Harness/AppDelegate.swift
+      - path: Harness/harness.js
+        buildPhase: resources
+      - path: user-says.wav
+        buildPhase: resources
+    info:
+      path: Harness/Info.plist
+      properties:
+        CFBundleDisplayName: Harness
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+        NSMicrophoneUsageDescription: Test du micro de la conversation
+        NSSpeechRecognitionUsageDescription: Test de la reconnaissance vocale
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.teatime.harness
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGN_IDENTITY: ""

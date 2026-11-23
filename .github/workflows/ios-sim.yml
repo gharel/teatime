@@ -1,0 +1,33 @@
+# Test de la conversation vocale dans le simulateur iOS 27 (branche de test, jamais main).
+name: Test iPhone (simulateur)
+
+on:
+  push:
+    branches: [ci/ios-sim]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-sim:
+    runs-on: xcode-27
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Conversation dans le simulateur
+        run: bash ci/ios-sim/run.sh
+        env:
+          RUNS: nouvelle-tape nouvelle-voix
+      - name: Traces
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-out
+          path: ios-out
+          retention-days: 3
