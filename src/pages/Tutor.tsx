@@ -249,6 +249,26 @@ export default function Tutor() {
     };
   }, []);
 
+  // iPhone : la compréhension (petit modèle) se prépare ici, après la voix et Whisper et avant la
+  // conversation, pour ne jamais se charger pendant qu'Emma parle.
+  useEffect(() => {
+    if (!sharedModelWorker()) return;
+    const tryStart = () => {
+      if (semantic.status.status !== 'idle') return;
+      const st = tts.neural.status;
+      if (getState().settings.ttsEngine !== 'system' && (st === 'idle' || st === 'loading')) return;
+      if (whisper.status.status === 'loading') return;
+      semantic.load();
+    };
+    tryStart();
+    const unTts = tts.subscribe(tryStart);
+    const unStt = whisper.subscribe(tryStart);
+    return () => {
+      unTts();
+      unStt();
+    };
+  }, []);
+
   // La page a été tuée pendant la dernière conversation (le navigateur l'a rechargée).
   const [crash, setCrash] = useState(() => {
     const c = crashOnStartup();
@@ -402,20 +422,26 @@ function StartButton({ onStart }: { onStart: () => void }) {
   const stt = useService(whisper, () => ({ ...whisper.status }));
   const voiceLoading = engine !== 'system' && (neural.status === 'idle' || neural.status === 'loading');
   const sttLoading = sharedModelWorker() && stt.status === 'loading';
+  const understanding = useService(semantic, () => ({ ...semantic.status }));
+  // iPhone : la compréhension finit de se charger avant qu'Emma parle (jamais pendant).
+  const undLoading = sharedModelWorker() && understanding.status === 'loading';
 
-  if (voiceLoading || sttLoading) {
-    const progress = voiceLoading ? neural.progress : stt.progress;
+  if (voiceLoading || sttLoading || undLoading) {
+    const progress = voiceLoading ? neural.progress : sttLoading ? stt.progress : understanding.progress;
     const pct = progress > 0 && progress < 1 ? ` ${Math.round(progress * 100)} %` : '';
     return (
       <div className="card center" aria-live="polite">
         <button className="btn primary lg block" disabled aria-busy="true">
-          <Icon name="hourglass" /> {voiceLoading ? `Emma s'échauffe la voix…${pct}` : `Préparation de l'écoute…${pct}`}
+          <Icon name="hourglass" />{' '}
+          {voiceLoading ? `Emma s'échauffe la voix…${pct}` : sttLoading ? `Préparation de l'écoute…${pct}` : `Préparation de la compréhension…${pct}`}
         </button>
         <Progress value={progress} />
         <p className="tiny muted" style={{ margin: '8px 0 0' }}>
           {voiceLoading
             ? 'Premier lancement uniquement : la voix est ensuite gardée en cache sur cet appareil.'
-            : 'La reconnaissance vocale (Whisper) s’initialise : quelques secondes.'}
+            : sttLoading
+              ? 'La reconnaissance vocale (Whisper) s’initialise : quelques secondes.'
+              : 'Emma prépare la compréhension de vos réponses : quelques secondes.'}
         </p>
         {voiceLoading && !isIOS() && (
           <button
