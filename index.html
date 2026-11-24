@@ -9,6 +9,89 @@
     <!-- L'appli gère ses propres thèmes : on demande aux modes sombres forcés (Dark Reader, mode nuit
          de Brave iOS) de ne pas inverser ses couleurs (rendu « en négatif »). -->
     <meta name="darkreader-lock" />
+    <!-- Écran de démarrage (dans #root, remplacé par la première page de l'appli) : jamais de page vide,
+         même quand les fichiers de l'appli ne se chargent pas. Couleurs du thème sans la feuille de style. -->
+    <style>
+      html { background: #fff9f2; color: #1f2a37; }
+      html[data-theme='dark'] { background: #11161a; color: #e9eef2; }
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme='light']) { background: #11161a; color: #e9eef2; }
+      }
+      body { margin: 0; }
+      #boot { box-sizing: border-box; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; font: 700 18px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+      #boot img { width: 64px; height: 64px; }
+      #boot p { margin: 0; max-width: 22em; font-size: 15px; font-weight: 400; opacity: 0.85; }
+      #boot button { font: inherit; font-size: 16px; padding: 10px 24px; border: 0; border-radius: 999px; background: #0e7c74; color: #fff; cursor: pointer; }
+      #boot [hidden] { display: none; }
+      .boot-spin { width: 22px; height: 22px; box-sizing: border-box; border-radius: 50%; border: 3px solid rgba(128, 128, 128, 0.3); border-top-color: #0e7c74; animation: boot-spin 0.9s linear infinite; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .boot-spin { animation-duration: 3s; } }
+    </style>
+    <script>
+      // Démarrage surveillé. Après une mise à jour du site, le navigateur peut rouvrir une ancienne copie
+      // de cette page (onglet restauré, cache) qui réclame des fichiers de l'appli supprimés depuis : rien
+      // ne s'affichait (page noire en thème sombre) tant qu'on n'actualisait pas. On recharge alors tout
+      // seul, au plus une fois par minute ; sinon l'écran de démarrage propose « Recharger ». Le prochain
+      // démarrage réussi note l'incident au journal (Réglages → Diagnostic).
+      (function () {
+        var boot = (window.teatimeBoot = { t0: Date.now(), ok: false });
+        var failed = false;
+        var lastError = '';
+        function note(what, reloading) {
+          var nav = '';
+          try {
+            nav = performance.getEntriesByType('navigation')[0].type;
+          } catch (e) {}
+          try {
+            localStorage.setItem('teatime:boot-fail', JSON.stringify({ t: Date.now(), page: boot.t0, what: what, nav: nav, reload: reloading }));
+          } catch (e) {}
+        }
+        function show(msg, stop) {
+          function go() {
+            var m = document.getElementById('boot-msg');
+            var b = document.getElementById('boot-retry');
+            var s = document.getElementById('boot-spin');
+            if (!m || !b || boot.ok) return;
+            m.textContent = msg;
+            m.hidden = b.hidden = false;
+            if (stop && s) s.hidden = true;
+          }
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go);
+          else go();
+        }
+        window.addEventListener(
+          'error',
+          function (e) {
+            var el = e.target;
+            if (!el || !el.tagName) {
+              // Erreur de script avant le démarrage : gardée pour le message, sans rechargement.
+              if (!boot.ok && e.message) lastError = String(e.message).slice(0, 120);
+              return;
+            }
+            var url = el.src || el.href || '';
+            var main = /\/assets\/index-[^/]*\.(js|css)$/.test(url);
+            if (failed || !/\/assets\//.test(url) || (boot.ok && !main)) return; // après le démarrage : l'appli s'en charge
+            if (el.tagName !== 'SCRIPT' && !(el.tagName === 'LINK' && /stylesheet|modulepreload/.test(el.rel))) return;
+            failed = true;
+            var file = url.split('/').pop();
+            var again = true;
+            try {
+              again = Date.now() - Number(sessionStorage.getItem('teatime:boot-reload') || 0) < 60000;
+              if (!again) sessionStorage.setItem('teatime:boot-reload', String(Date.now()));
+            } catch (err) {}
+            note('fichier ' + file + ' introuvable', !again);
+            if (!again) location.reload();
+            else show('Tea Time n’a pas pu se charger (fichier ' + file + ' introuvable). Vérifiez la connexion, puis rechargez.', true);
+          },
+          true,
+        );
+        setTimeout(function () {
+          if (boot.ok || failed) return;
+          note('rien d’affiché après 12 s' + (lastError ? ' · ' + lastError : ''), false);
+          show('Le chargement prend plus de temps que prévu' + (lastError ? ' (' + lastError + ')' : '') + '.', false);
+        }, 12000);
+      })();
+    </script>
     <!-- GitHub Pages n'envoie pas les en-têtes COOP/COEP : ce service worker les ajoute (isolation
          cross-origin => WASM multi-thread pour la voix et la reconnaissance). Il ne fait rien quand
          l'hébergeur les envoie déjà (serveur de dev, Cloudflare Pages, Netlify). -->
@@ -70,7 +153,15 @@
     <title>Tea Time English</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot" role="status">
+        <img src="./favicon.svg" alt="" />
+        <span>Tea Time English</span>
+        <span class="boot-spin" id="boot-spin" aria-hidden="true"></span>
+        <p id="boot-msg" hidden></p>
+        <button id="boot-retry" type="button" onclick="location.reload()" hidden>Recharger</button>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
