@@ -59,12 +59,24 @@
           if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', go);
           else go();
         }
+        // Échec : rechargement automatique au plus une fois par minute, sinon message et « Recharger ».
+        function fail(what, msg) {
+          failed = true;
+          var again = true;
+          try {
+            again = Date.now() - Number(sessionStorage.getItem('teatime:boot-reload') || 0) < 60000;
+            if (!again) sessionStorage.setItem('teatime:boot-reload', String(Date.now()));
+          } catch (err) {}
+          note(what, !again);
+          if (!again) location.reload();
+          else show(msg, true);
+        }
         window.addEventListener(
           'error',
           function (e) {
             var el = e.target;
             if (!el || !el.tagName) {
-              // Erreur de script avant le démarrage : gardée pour le message, sans rechargement.
+              // Erreur de script avant le démarrage : gardée pour le message.
               if (!boot.ok && e.message) lastError = String(e.message).slice(0, 120);
               return;
             }
@@ -72,19 +84,22 @@
             var main = /\/assets\/index-[^/]*\.(js|css)$/.test(url);
             if (failed || !/\/assets\//.test(url) || (boot.ok && !main)) return; // après le démarrage : l'appli s'en charge
             if (el.tagName !== 'SCRIPT' && !(el.tagName === 'LINK' && /stylesheet|modulepreload/.test(el.rel))) return;
-            failed = true;
             var file = url.split('/').pop();
-            var again = true;
-            try {
-              again = Date.now() - Number(sessionStorage.getItem('teatime:boot-reload') || 0) < 60000;
-              if (!again) sessionStorage.setItem('teatime:boot-reload', String(Date.now()));
-            } catch (err) {}
-            note('fichier ' + file + ' introuvable', !again);
-            if (!again) location.reload();
-            else show('Tea Time n’a pas pu se charger (fichier ' + file + ' introuvable). Vérifiez la connexion, puis rechargez.', true);
+            fail('fichier ' + file + ' introuvable', 'Tea Time n’a pas pu se charger (fichier ' + file + ' introuvable). Vérifiez la connexion, puis rechargez.');
           },
           true,
         );
+        // Code de l'appli exécuté sans qu'elle démarre (une exception dans ses modules, par ex. celle du
+        // script anti-empreinte de Brave sur la liste des voix) : inutile d'attendre 12 s.
+        window.addEventListener('load', function () {
+          setTimeout(function () {
+            if (boot.ok || failed) return;
+            fail(
+              'l’appli s’est arrêtée au démarrage' + (lastError ? ' · ' + lastError : ''),
+              'Tea Time n’a pas pu démarrer' + (lastError ? ' (' + lastError + ')' : '') + '. Rechargez la page.',
+            );
+          }, 1500);
+        });
         setTimeout(function () {
           if (boot.ok || failed) return;
           note('rien d’affiché après 12 s' + (lastError ? ' · ' + lastError : ''), false);

@@ -193,6 +193,28 @@ function fmtWasm(w: { mb: number; parts: number[]; grow: number | null }): strin
   return `${w.mb} Mo${split}${grow}`;
 }
 
+let voicesErrorNoted = false;
+
+/**
+ * Voix anglaises du système, sans jamais lever d'exception. Brave sur iPhone (protection
+ * anti-empreinte des Shields) remplace speechSynthesis.getVoices() par une version qui plante
+ * (« Object.getPrototypeOf(voice) ») quand la liste est encore vide (voix pas encore chargées, au
+ * lancement) ou quand son tirage au hasard tombe juste après la dernière voix. Appelée au chargement
+ * du module, l'exception arrêtait tout le code de l'appli : page noire, puis écran de démarrage bloqué.
+ * Liste vide à la place ; « voiceschanged » la redemande quand les voix arrivent.
+ */
+export function englishSystemVoices(synth: Pick<SpeechSynthesis, 'getVoices'>): SpeechSynthesisVoice[] {
+  try {
+    return (synth.getVoices() ?? []).filter((v) => !!v && typeof v.lang === 'string' && v.lang.toLowerCase().startsWith('en'));
+  } catch (err) {
+    if (!voicesErrorNoted) {
+      voicesErrorNoted = true;
+      journal(`voix du système illisibles, liste vide à la place (${String((err as Error)?.message ?? err).slice(0, 90)})`);
+    }
+    return [];
+  }
+}
+
 class TtsService {
   /** Voix neuronale (Kokoro ou Piper selon l'appareil). */
   neural: EngineStatus = { status: 'idle', progress: 0 };
@@ -259,7 +281,7 @@ class TtsService {
     if (typeof window === 'undefined') return;
     if ('speechSynthesis' in window) {
       const refresh = () => {
-        this.systemVoices = speechSynthesis.getVoices().filter((v) => v.lang.toLowerCase().startsWith('en'));
+        this.systemVoices = englishSystemVoices(speechSynthesis);
         this.emit();
       };
       refresh();
