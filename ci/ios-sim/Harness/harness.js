@@ -19,6 +19,97 @@
   // Mode « demarrage » : phase A, l'onglet s'ouvre (l'appli de test enregistre son état) ; phase B, après
   // la mise à jour du site, l'onglet est restauré comme Brave le fait au lancement. À chaque chargement :
   // ce qui s'affiche au bout de 15 s au plus (l'appli, l'écran de démarrage, ou rien).
+  // Mode « reglages » : page Réglages d'un apprenant (journal rempli, plantage récent) à la largeur du
+  // téléphone ; ce qui dépasse à droite (ascenseur horizontal), diagnostic fermé puis ouvert.
+  if (H.mode === 'reglages') {
+    if (!sessionStorage.getItem('h:stage')) {
+      localStorage.clear();
+      localStorage.setItem('teatime-english:v1', JSON.stringify({ settings: H.settings || {}, profile: { name: 'Tom', onboarded: true, level: 'A2' } }));
+      const t = Date.now() - 600000;
+      const lines = [
+        '— page ouverte —',
+        'micro ouvert (Whisper) · session play-and-record · capture 48000 Hz · lecteur de capture running',
+        'whisper : modèle onnx-community/whisper-base chargé en 4,2 s · mémoire du moteur 615 Mo',
+        'téléchargement https://huggingface.co/onnx-community/whisper-base/resolve/main/onnx/decoder_model_merged_quantized.onnx',
+        'phrase de 3,4 s programmée · départ dans 0,0 s · lecteur running · tête 12,345 s · horloge 12,301 s',
+        '⚠ PLANTAGE : la page a été tuée pendant « conversation (Emma parle) »',
+      ];
+      localStorage.setItem('teatime:journal', JSON.stringify(lines.concat(lines, lines).map((e, i) => ({ t: t + i * 1000, e }))));
+      localStorage.setItem('teatime:last-crash', JSON.stringify({ label: 'conversation (Emma parle)', t: Date.now() - 60000 }));
+      sessionStorage.setItem('h:stage', 'run');
+      post('réglages et journal écrits');
+      location.href = `${location.origin}${location.pathname}?r=${Date.now()}#/reglages`;
+      return;
+    }
+    const measure = (label) => {
+      const W = document.documentElement.clientWidth;
+      const out = [];
+      for (const el of document.querySelectorAll('body *')) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || r.right <= W + 0.5) continue;
+        if ([...el.children].some((c) => c.getBoundingClientRect().right > W + 0.5)) continue;
+        const cls = typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().replace(/\s+/g, '.') : '';
+        const path = [];
+        for (let p = el.parentElement; p && p !== document.body && path.length < 4; p = p.parentElement) {
+          path.push(p.tagName.toLowerCase() + (typeof p.className === 'string' && p.className.trim() ? '.' + p.className.trim().split(/\s+/)[0] : ''));
+        }
+        out.push(`${el.tagName.toLowerCase()}${cls} droite ${Math.round(r.right)} larg. ${Math.round(r.width)} « ${(el.textContent || el.value || '').trim().slice(0, 50)} » dans ${path.join(' < ')}`);
+      }
+      post(`${label} : largeur ${W} (fenêtre ${innerWidth}, vue ${window.visualViewport ? Math.round(visualViewport.width) : '?'}) · page ${document.documentElement.scrollWidth} · body ${document.body.scrollWidth} · ${out.length} éléments dépassent`);
+      out.slice(0, 30).forEach((o) => post(`  dépasse : ${o}`));
+    };
+    // Débordement sans boîte qui dépasse : textes qui dépassent, puis ce qui le fait disparaître une
+    // fois masqué (un élément à la fois), puis le correctif des menus injecté.
+    const culprits = () => {
+      const W = document.documentElement.clientWidth;
+      const page = () => document.documentElement.scrollWidth;
+      const base = page();
+      if (base <= W) return post('  aucun débordement');
+      const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let texts = 0;
+      for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+        if (!n.textContent.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(n);
+        const rr = range.getBoundingClientRect();
+        if (rr.width && rr.right > W + 0.5 && texts++ < 10) post(`  texte qui dépasse : ${n.parentElement.tagName.toLowerCase()} → ${Math.round(rr.right)} « ${n.textContent.trim().slice(0, 60)} »`);
+      }
+      post(`  ${texts} texte(s) qui dépasse(nt)`);
+      const name = (el) => {
+        if (el.tagName === 'SELECT') return `menu « ${(el.options[el.selectedIndex] || {}).text || '?'} » (${el.getAttribute('aria-label') || (el.closest('label') || {}).firstChild?.textContent?.trim() || '?'})`;
+        return `${el.tagName.toLowerCase()}${typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\s+/)[0] : ''} « ${(el.textContent || '').trim().slice(0, 40)} »`;
+      };
+      let found = 0;
+      for (const el of document.querySelectorAll('select, input, textarea, .engine-row, .card, .diag-section, .page-head, .section-title, details, .switch, .row')) {
+        const prev = el.style.display;
+        el.style.display = 'none';
+        const w = page();
+        el.style.display = prev;
+        if (w < base && found++ < 15) post(`  sans ${name(el)} : page ${w}`);
+      }
+      const st = document.createElement('style');
+      st.textContent = 'select { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }';
+      document.head.appendChild(st);
+      post(`  avec le correctif des menus injecté : page ${page()}`);
+      st.remove();
+    };
+    post(`page ${location.href} · UA ${navigator.userAgent}`);
+    setTimeout(() => {
+      measure('diagnostic fermé');
+      culprits();
+      const d = document.getElementById('diagnostic');
+      if (d) d.open = true;
+      setTimeout(() => {
+        measure('diagnostic ouvert');
+        culprits();
+        // Nouvelle version : rubriques d'effacement affichées ?
+        post(`  rubriques d'effacement : ${document.querySelectorAll('.check-row').length}`);
+        post('EXIT');
+      }, 2500);
+    }, 6000);
+    return;
+  }
+
   if (String(H.mode).startsWith('demarrage')) {
     const phase = H.phase || 'A';
     const nav = () => {

@@ -122,7 +122,7 @@ run() {
   echo "fin de l'essai après ${t} s"
   xcrun simctl io "$UDID" screenshot "$OUT/$label.png" > /dev/null 2>&1 || true
   xcrun simctl terminate "$UDID" com.teatime.harness > /dev/null 2>&1 || true
-  grep -E "MOI :|EMMA :|FIN|DÉLAI|erreur|TERMINATED|media-permission|page http" "$OUT/$label.log" | cut -c1-220
+  grep -E "MOI :|EMMA :|FIN|DÉLAI|erreur|TERMINATED|media-permission|page http|dépasse|diagnostic (fermé|ouvert)|  sans |injecté|aucun débordement|rubriques" "$OUT/$label.log" | cut -c1-320
   # Voix d'Emma pendant cet essai (journal relayé après le clic, pas celui d'un essai précédent).
   awk '/clic « Commencer/{on=1} on' "$OUT/$label.log" > "$OUT/$label.after"
   c() { grep -c -- "$1" "$OUT/$label.after"; }
@@ -192,6 +192,9 @@ for r in $RUNS; do
     demarrage) run_boot demarrage /tmp/dist-new 600 0 3 ;;
     demarrage-evince) run_boot demarrage-evince /tmp/dist-new 600 1 3 ;;
     demarrage-expire) run_boot demarrage-expire /tmp/dist-new 5 0 10 ;;
+    # Page Réglages à la largeur du téléphone : ce qui dépasse à droite (ascenseur horizontal).
+    reglages) run reglages http://localhost:4317/ '{}' reglages ;;
+    reglages-ancienne) run reglages-ancienne http://localhost:4318/ '{}' reglages ;;
   esac
 done
 
