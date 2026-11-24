@@ -4,6 +4,7 @@ import { onSttNotice } from './lib/stt';
 import { dueCards, useAppState, getState } from './lib/store';
 import { onTtsNotice, tts } from './lib/tts';
 import { autoReload } from './lib/recover';
+import { checkForUpdate } from './lib/update';
 import Home from './pages/Home';
 import Icon, { type IconName } from './components/Icon';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -108,6 +109,9 @@ export default function App() {
     }
     document.getElementById('main')?.focus({ preventScroll: true });
   }, [route]);
+
+  // Onglet restauré avec une ancienne version en cache (Brave sur iPhone) : la nouvelle est chargée.
+  useEffect(() => checkForUpdate((msg) => notify('info', msg, 8000)), []);
 
   // Bascule automatique de reconnaissance vocale (ex. service en ligne injoignable) : on prévient l'apprenant.
   useEffect(() => {
