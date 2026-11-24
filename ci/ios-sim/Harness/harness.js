@@ -38,11 +38,14 @@
     );
     post(`${phase} chargement ${location.href} · ouverture ${nav()}`);
     let n = 0;
+    let seen = 0;
     const tick = setInterval(() => {
       n++;
       const $ = (s) => document.querySelector(s);
       const app = !!$('.app');
-      if (!app && n < 60) return;
+      if (app && !seen) seen = n;
+      // Phase B : 5 s de plus une fois l'appli affichée, le temps qu'elle se recharge vers la nouvelle version.
+      if (app ? phase === 'B' && n - seen < 20 : n < 60) return;
       clearInterval(tick);
       let j = [];
       try {
