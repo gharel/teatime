@@ -2071,3 +2071,25 @@ strong.label-icon,
   display: flex;
   flex-direction: column;
 }
+
+/* Filet de sécurité (ErrorBoundary) : message et « Recharger » au lieu d'une page vide. */
+.crash-screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+}
+.crash-page {
+  padding: 24px 16px;
+}
+.crash-screen > .card,
+.crash-page > .card {
+  max-width: 32rem;
+  margin: 0 auto;
+}
+.crash-detail {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
