@@ -80,10 +80,43 @@ export function journalTime(t: number): string {
   return d.toDateString() === new Date().toDateString() ? hms : `${d.getDate()}/${d.getMonth() + 1} ${hms}`;
 }
 
+const NAVIGATION: Record<string, string> = { navigate: 'ouverture', reload: 'actualisation', back_forward: 'onglet restauré' };
+
+function navigationType(): string {
+  try {
+    return (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined)?.type ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Démarrage raté (fichier de l'appli introuvable) ou lent, noté par l'écran de démarrage d'index.html :
+ * relevé ici au démarrage réussi suivant, avec son heure.
+ */
+function bootIncident(): JournalEntry | null {
+  try {
+    const r = JSON.parse(localStorage.getItem('teatime:boot-fail') || 'null');
+    localStorage.removeItem('teatime:boot-fail');
+    if (!r || typeof r.what !== 'string' || typeof r.t !== 'number') return null;
+    if (r.page === window.teatimeBoot?.t0) return { t: r.t, e: `démarrage lent : ${r.what}` };
+    const how = NAVIGATION[r.nav] ?? 'ouverture';
+    return { t: r.t, e: `⚠ DÉMARRAGE RATÉ (${how}) : ${r.what}${r.reload ? ' → rechargement automatique' : ''}` };
+  } catch {
+    return null;
+  }
+}
+
 if (typeof window !== 'undefined') {
   const crash = crashOnStartup();
   if (crash) journal(`⚠ PLANTAGE : la page a été tuée pendant « ${crash.label} »`);
-  journal('— page ouverte —');
+  const boot = bootIncident();
+  if (boot) {
+    entries.push(boot);
+    if (entries.length > MAX) entries = entries.slice(-MAX);
+  }
+  const nav = navigationType();
+  journal(`— page ouverte —${nav && nav !== 'navigate' ? ` (${NAVIGATION[nav] ?? nav})` : ''}`);
   document.addEventListener('visibilitychange', () => journal(document.hidden ? 'page masquée' : 'page visible'));
   window.addEventListener('pagehide', () => journal('page quittée'));
 }

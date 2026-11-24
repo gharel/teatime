@@ -6,6 +6,7 @@ import { onTtsNotice, tts } from './lib/tts';
 import { autoReload } from './lib/recover';
 import Home from './pages/Home';
 import Icon, { type IconName } from './components/Icon';
+import ErrorBoundary from './components/ErrorBoundary';
 
 /** Page chargée à la demande ; module introuvable (appli mise à jour entre-temps) : rechargement. */
 function page<T extends ComponentType<any>>(load: () => Promise<{ default: T }>) {
@@ -186,15 +187,18 @@ export default function App() {
             </div>
           </header>
         )}
-        <Suspense
-          fallback={
-            <div className="page-loading" role="status" aria-live="polite">
-              <span className="spinner" aria-hidden /> Chargement…
-            </div>
-          }
-        >
-          <Page route={route} />
-        </Suspense>
+        {/* Une page en erreur garde la navigation ; changer de page repart de zéro (key). */}
+        <ErrorBoundary key={route}>
+          <Suspense
+            fallback={
+              <div className="page-loading" role="status" aria-live="polite">
+                <span className="spinner" aria-hidden /> Chargement…
+              </div>
+            }
+          >
+            <Page route={route} />
+          </Suspense>
+        </ErrorBoundary>
       </main>
       <nav className="bottom-nav" aria-label="Navigation principale">
         {NAV.map(link)}
