@@ -201,11 +201,11 @@ function load(): AppState {
 
 let state: AppState = load();
 const listeners = new Set<() => void>();
-let saveTimer: number | undefined;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 function persist() {
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
     try {
       localStorage.setItem(KEY, JSON.stringify(state));
     } catch {
@@ -245,6 +245,54 @@ export function resetAll() {
     /* ignore */
   }
   listeners.forEach((l) => l());
+}
+
+/** Rubriques de l'appli dont les données s'effacent séparément (Réglages → Mes données). */
+export type DataSection = 'path' | 'reviews' | 'tutor' | 'games' | 'rewards' | 'profile' | 'settings';
+
+/** Compteurs du jour propres à chaque rubrique (l'XP du jour va avec « rewards »). */
+const SECTION_DAY_FIELDS: Partial<Record<DataSection, DayField[]>> = {
+  path: ['lessons', 'perfect'],
+  reviews: ['reviews'],
+  tutor: ['tutorTurns', 'speakOk'],
+  games: ['games'],
+};
+
+/**
+ * Efface les données des rubriques choisies et garde tout le reste : par exemple les révisions et les
+ * conversations avec Emma, en gardant le prénom et le niveau du test. Les badges qui reposaient sur des
+ * données effacées disparaissent.
+ */
+export function resetSections(sections: readonly DataSection[]) {
+  if (!sections.length) return;
+  const has = (x: DataSection) => sections.includes(x);
+  setState((s0) => {
+    const base = initialState();
+    const s: AppState = { ...s0, totals: { ...s0.totals } };
+    if (has('path')) {
+      s.units = {};
+      Object.assign(s.totals, { lessons: 0, perfect: 0, exercises: 0, correct: 0 });
+    }
+    if (has('reviews')) {
+      s.srs = {};
+      s.totals.reviews = 0;
+    }
+    if (has('tutor')) Object.assign(s.totals, { tutorTurns: 0, tutorSeconds: 0, corrections: 0, speakOk: 0, topics: {} });
+    if (has('games')) {
+      s.bests = {};
+      s.totals.games = 0;
+    }
+    const fields = sections.flatMap((x) => SECTION_DAY_FIELDS[x] ?? []);
+    if (fields.length) {
+      const zero = Object.fromEntries(fields.map((f) => [f, 0]));
+      s.days = Object.fromEntries(Object.entries(s.days).map(([k, d]) => [k, { ...d, ...zero }]));
+    }
+    if (has('rewards')) Object.assign(s, { xp: 0, days: {}, streak: base.streak, badges: {}, questsClaimed: {} });
+    if (has('profile')) s.profile = base.profile;
+    if (has('settings')) s.settings = base.settings;
+    s.badges = Object.fromEntries(Object.entries(s.badges).filter(([id]) => BADGES.find((b) => b.id === id)?.test(s) ?? true));
+    return s;
+  });
 }
 
 export function exportData(): string {

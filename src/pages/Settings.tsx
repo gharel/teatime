@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { exportData, importData, resetAll, updateSettings, useAppState, setName, type Settings as S } from '../lib/store';
+import {
+  displayedStreak,
+  exportData,
+  importData,
+  resetAll,
+  resetSections,
+  updateSettings,
+  useAppState,
+  setName,
+  type AppState,
+  type DataSection,
+  type Settings as S,
+} from '../lib/store';
 import { say, tts } from '../lib/tts';
 import { listen, webSpeechSupported } from '../lib/stt';
 import { WEBLLM_MODELS, llm } from '../lib/llm';
@@ -297,18 +309,128 @@ export default function Settings() {
               }
             }}
           />
-          <button
-            className="btn danger"
-            onClick={() => {
-              if (window.confirm('Effacer toute votre progression ? Cette action est irréversible.')) {
-                resetAll();
-                navigate('/');
-              }
-            }}
-          >
-            <Icon name="trash" size={16} /> Tout effacer
-          </button>
         </div>
+        <DataReset />
+      </div>
+    </div>
+  );
+}
+
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n > 1 ? many : one}`;
+
+/** Rubriques effaçables séparément, avec ce qu'elles contiennent en ce moment. */
+const DATA_SECTIONS: { id: DataSection; label: string; detail: (s: AppState) => string }[] = [
+  {
+    id: 'path',
+    label: 'Parcours',
+    detail: (s) => {
+      const n = Object.keys(s.units).length;
+      return n ? count(n, 'leçon terminée', 'leçons terminées') : 'Aucune leçon terminée';
+    },
+  },
+  {
+    id: 'reviews',
+    label: 'Révisions',
+    detail: (s) => {
+      const cards = Object.values(s.srs);
+      const emma = cards.filter((c) => c.kind === 'phrase').length;
+      return cards.length ? `${count(cards.length, 'carte')}${emma ? `, dont ${count(emma, 'correction')} d’Emma` : ''}` : 'Aucune carte';
+    },
+  },
+  {
+    id: 'tutor',
+    label: 'Conversations avec Emma',
+    detail: (s) =>
+      s.totals.tutorTurns || s.totals.tutorSeconds || s.totals.speakOk
+        ? `${count(s.totals.tutorTurns, 'échange')} · ${Math.round(s.totals.tutorSeconds / 60)} min · ${count(Object.keys(s.totals.topics).length, 'thème')} · ${count(s.totals.speakOk, 'phrase bien prononcée', 'phrases bien prononcées')}`
+        : 'Aucune conversation',
+  },
+  {
+    id: 'games',
+    label: 'Jeux',
+    detail: (s) =>
+      s.totals.games || Object.keys(s.bests).length
+        ? `${count(s.totals.games, 'partie')} · ${count(Object.keys(s.bests).length, 'record')}`
+        : 'Aucune partie',
+  },
+  {
+    id: 'rewards',
+    label: 'Points, série et badges',
+    detail: (s) => {
+      const streak = displayedStreak(s);
+      const badges = Object.keys(s.badges).length;
+      if (!s.xp && !streak && !badges) return 'Aucun point';
+      return `${s.xp} XP · ${streak ? `série de ${count(streak, 'jour')}` : 'pas de série en cours'} · ${count(badges, 'badge')}`;
+    },
+  },
+  {
+    id: 'profile',
+    label: 'Profil et niveau',
+    detail: (s) =>
+      [
+        s.profile.name ? `Prénom « ${s.profile.name} »` : 'Sans prénom',
+        s.profile.level ? `niveau ${s.profile.level}` : 'niveau à définir',
+        s.profile.placements.length ? `test de niveau passé ${s.profile.placements.length > 1 ? `${s.profile.placements.length} fois` : 'une fois'}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+  },
+  {
+    id: 'settings',
+    label: 'Réglages',
+    detail: () => 'Voix, micro, IA et thème reviennent aux valeurs par défaut',
+  },
+];
+
+/** Effacer une partie des données, rubrique par rubrique (le reste est gardé), ou tout. */
+function DataReset() {
+  const st = useAppState((s) => s);
+  const [picked, setPicked] = useState<DataSection[]>([]);
+  const labels = DATA_SECTIONS.filter((d) => picked.includes(d.id)).map((d) => d.label);
+  return (
+    <div className="data-reset">
+      <h4>Effacer une partie de mes données</h4>
+      <p className="small muted">Cochez ce qu’il faut effacer : tout le reste est gardé.</p>
+      <div className="check-list">
+        {DATA_SECTIONS.map((d) => (
+          <label key={d.id} className="check-row">
+            <input
+              type="checkbox"
+              checked={picked.includes(d.id)}
+              onChange={(e) => setPicked((p) => (e.target.checked ? [...p, d.id] : p.filter((x) => x !== d.id)))}
+            />
+            <span>
+              <strong>{d.label}</strong>
+              <span className="tiny muted">{d.detail(st)}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      <div className="row">
+        <button
+          className="btn danger"
+          disabled={!picked.length}
+          onClick={() => {
+            if (!window.confirm(`Effacer : ${labels.join(', ')} ?\n\nTout le reste est gardé. Cette action est irréversible.`)) return;
+            resetSections(picked);
+            setPicked([]);
+            notify('ok', `Effacé : ${labels.join(', ')}`);
+            if (picked.includes('profile')) navigate('/');
+          }}
+        >
+          <Icon name="trash" size={16} /> Effacer la sélection
+        </button>
+        <button
+          className="btn danger"
+          onClick={() => {
+            if (window.confirm('Effacer toute votre progression ? Cette action est irréversible.')) {
+              resetAll();
+              navigate('/');
+            }
+          }}
+        >
+          <Icon name="trash" size={16} /> Tout effacer
+        </button>
       </div>
     </div>
   );

@@ -69,7 +69,7 @@ Le certificat du serveur est régénéré à chaque lancement pour l'adresse IP 
 | Analyse de prononciation | **wav2vec2-lv-60-espeak** (Transformers.js, ≈ 320 Mo, WASM ; désactivée par défaut sur téléphone) + **eSpeak-NG** (`phonemizer`) | Le modèle transcrit les **phonèmes réellement prononcés**, sans modèle de langue (il ne « corrige » pas). La comparaison avec la prononciation attendue repère les erreurs typiques : TH, H muet, R de gorge, voyelles nasales ou françaises, /ɪ/–/iː/, /æ/, diphtongues… Les mots concernés sont soulignés, avec un conseil en français, et un bilan correctif est proposé en fin de conversation. |
 | Lip-sync | Moteur maison | Phonèmes IPA (fournis par Kokoro) → 14 visèmes, synchronisés avec l'horloge audio et modulés par l'enveloppe audio réelle. Co-articulation entre visèmes. Pour les voix système : graphèmes → visèmes, recalés à chaque mot. |
 | Avatar | SVG animé en `requestAnimationFrame` | Aucun re-render React par frame. Clignements, regard, sourcils, expressions, mouvements de tête ; respecte `prefers-reduced-motion`. |
-| Stockage | `localStorage` + Cache Storage | Progression, révisions et réglages stockés localement, avec export/import JSON. |
+| Stockage | `localStorage` + Cache Storage | Progression, révisions et réglages stockés localement, avec export/import JSON. Réglages → Mes données : effacement par rubrique (parcours, révisions, conversations avec Emma, jeux, points/série/badges, profil et niveau, réglages ; le reste est gardé, les badges qui reposaient sur des données effacées disparaissent) ou de tout. |
 
 ### Performance
 
