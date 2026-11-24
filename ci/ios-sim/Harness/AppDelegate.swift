@@ -72,7 +72,8 @@ final class WebController: UIViewController, WKUIDelegate, WKNavigationDelegate,
     if let p = Bundle.main.path(forResource: "user-says", ofType: "wav"), let d = FileManager.default.contents(atPath: p) {
       wav = d.base64EncodedString()
     }
-    let prelude = "window.__HARNESS = { settings: \(settings), turns: \(turns), timeout: \(timeout), mode: '\(mode)', wav: '\(wav)' };\n"
+    let phase = env["HARNESS_PHASE"] ?? "A"
+    let prelude = "window.__HARNESS = { settings: \(settings), turns: \(turns), timeout: \(timeout), mode: '\(mode)', phase: '\(phase)', wav: '\(wav)' };\n"
     // Au début du document : les espions (niveaux du micro, texte de Whisper) précèdent le code de l'appli.
     uc.addUserScript(WKUserScript(source: prelude + js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
     cfg.userContentController = uc
@@ -83,8 +84,23 @@ final class WebController: UIViewController, WKUIDelegate, WKNavigationDelegate,
     if #available(iOS 16.4, *) { web.isInspectable = true }
     view.addSubview(web)
     let url = URL(string: env["HARNESS_URL"] ?? "http://localhost:4317/")!
+    // Test « demarrage », phase B : l'onglet enregistré en phase A est restauré comme Brave le fait au
+    // lancement (état de navigation de la WKWebView), au lieu d'ouvrir l'adresse.
+    if mode.hasPrefix("demarrage"), phase == "B", let state = try? Data(contentsOf: tabStateURL) {
+      out("restauration de l'onglet (interactionState, \(state.count) octets)")
+      web.interactionState = state
+      return
+    }
     out("load \(url) session=\(AVAudioSession.sharedInstance().category.rawValue)")
     web.load(URLRequest(url: url))
+  }
+
+  private var tabStateURL: URL {
+    FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("tab-state.data")
+  }
+
+  func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+    out("nav-commit \(webView.url?.absoluteString ?? "?")")
   }
 
   func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
@@ -95,6 +111,15 @@ final class WebController: UIViewController, WKUIDelegate, WKNavigationDelegate,
   func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
     let s = "\(message.body)"
     out(s)
+    // Test « demarrage », fin de la phase A : état de l'onglet enregistré (comme Brave avant d'être tué).
+    if s.hasPrefix("PHASE-A") {
+      if let state = web.interactionState as? Data {
+        try? state.write(to: tabStateURL)
+        out("ÉTAT ENREGISTRÉ \(state.count) octets")
+      } else {
+        out("ÉTAT ABSENT \(String(describing: web.interactionState))")
+      }
+    }
     if s.hasPrefix("EXIT") {
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { exit(0) }
     }

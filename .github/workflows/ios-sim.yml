@@ -23,7 +23,9 @@ jobs:
       - name: Conversation dans le simulateur
         run: bash ci/ios-sim/run.sh
         env:
-          RUNS: en-ligne-voix en-ligne-tape
+          # Démarrage après une mise à jour du site : 4a6ef9e (sans garde-fou) puis la nouvelle version.
+          RUNS: demarrage-ancienne demarrage-ancienne-evince demarrage-ancienne-expire demarrage demarrage-evince demarrage-expire
+          OLD_REF: 4a6ef9e
           TURNS: 5
       - name: Traces
         if: always()

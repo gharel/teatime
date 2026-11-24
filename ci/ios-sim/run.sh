@@ -130,6 +130,49 @@ run() {
   grep -E "départ dans|horloge|figé|lecteur neuf|toujours en cours|recalée" "$OUT/$label.after" | grep -v "départ dans 0,0 s" | cut -c1-200 | head -20
 }
 
+# Démarrage après une mise à jour du site : l'onglet s'ouvre (version A), l'appli de test enregistre
+# son état puis est tuée ; le site passe en version B (fichiers d'entrée de A supprimés) ; relancée,
+# l'appli restaure l'onglet comme Brave (interactionState). Ce qui s'affiche alors, et ce que la page
+# a demandé au serveur.
+BOOTPORT=4330
+run_boot() {
+  local label="$1" dir="$2" maxage="$3" evict="$4" wait="$5"
+  BOOTPORT=$((BOOTPORT + 1))
+  local port=$BOOTPORT
+  step "Essai « $label » : $dir · max-age $maxage · code d'entrée évincé $evict · relance après $wait s"
+  node "$HERE/boot-serve.mjs" "$dir" "$port" "$maxage" "$evict" > "$OUT/$label-serveur.log" 2>&1 &
+  local spid=$!
+  sleep 1
+  local data hlog t=0
+  data=$(xcrun simctl get_app_container "$UDID" com.teatime.harness data)
+  hlog="$data/Documents/harness.log"
+  rm -f "$hlog" "$data/Documents/tab-state.data"
+  SIMCTL_CHILD_HARNESS_URL="http://localhost:$port/" SIMCTL_CHILD_HARNESS_MODE=demarrage SIMCTL_CHILD_HARNESS_PHASE=A \
+    xcrun simctl launch --terminate-running-process "$UDID" com.teatime.harness > /dev/null
+  while [ $t -lt 60 ] && ! grep -q "ÉTAT " "$hlog" 2>/dev/null; do
+    sleep 1
+    t=$((t + 1))
+  done
+  xcrun simctl io "$UDID" screenshot "$OUT/$label-A.png" > /dev/null 2>&1 || true
+  xcrun simctl terminate "$UDID" com.teatime.harness > /dev/null 2>&1 || true
+  curl -s "http://localhost:$port/__deploy" > /dev/null
+  sleep "$wait"
+  SIMCTL_CHILD_HARNESS_URL="http://localhost:$port/" SIMCTL_CHILD_HARNESS_MODE=demarrage SIMCTL_CHILD_HARNESS_PHASE=B \
+    xcrun simctl launch "$UDID" com.teatime.harness > /dev/null
+  t=0
+  while [ $t -lt 60 ] && ! grep -q "HARNESS EXIT" "$hlog" 2>/dev/null; do
+    sleep 1
+    t=$((t + 1))
+  done
+  xcrun simctl io "$UDID" screenshot "$OUT/$label.png" > /dev/null 2>&1 || true
+  xcrun simctl terminate "$UDID" com.teatime.harness > /dev/null 2>&1 || true
+  kill "$spid" 2>/dev/null || true
+  cp "$hlog" "$OUT/$label.log" 2>/dev/null || echo "(pas de trace de l'appli)" > "$OUT/$label.log"
+  sed 's/^HARNESS //' "$OUT/$label.log" | grep -v -E "^(niveaux|réglages)" | cut -c1-260
+  echo "--- requêtes au serveur ---"
+  cut -c1-200 "$OUT/$label-serveur.log"
+}
+
 RUNS="${RUNS:-nouvelle nouvelle-webspeech ancienne}"
 for r in $RUNS; do
   case "$r" in
@@ -141,6 +184,14 @@ for r in $RUNS; do
     en-ligne-tape) run en-ligne-tape https://gharel.github.io/teatime/ '{"sttEngine":"webspeech","settingsRev":4,"whisperModel":"onnx-community/whisper-base"}' tape ;;
     nouvelle-webspeech) run nouvelle-webspeech http://localhost:4317/ '{"sttEngine":"webspeech","settingsRev":5}' ;;
     ancienne) run ancienne http://localhost:4318/ '{}' ;;
+    # Démarrage après mise à jour : version $OLD_REF (sans garde-fou) puis nouvelle version.
+    # max-age 600 comme Pages ; « evince » : code d'entrée de A absent du cache ; « expire » : cache périmé.
+    demarrage-ancienne) run_boot demarrage-ancienne /tmp/dist-old 600 0 3 ;;
+    demarrage-ancienne-evince) run_boot demarrage-ancienne-evince /tmp/dist-old 600 1 3 ;;
+    demarrage-ancienne-expire) run_boot demarrage-ancienne-expire /tmp/dist-old 5 0 10 ;;
+    demarrage) run_boot demarrage /tmp/dist-new 600 0 3 ;;
+    demarrage-evince) run_boot demarrage-evince /tmp/dist-new 600 1 3 ;;
+    demarrage-expire) run_boot demarrage-expire /tmp/dist-new 5 0 10 ;;
   esac
 done
 

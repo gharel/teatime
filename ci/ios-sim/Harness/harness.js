@@ -16,6 +16,50 @@
   window.addEventListener('error', (e) => post(`js-error ${e.message || ''} ${(e.filename || '').split('/').pop()}:${e.lineno || ''}`));
   window.addEventListener('unhandledrejection', (e) => post(`js-rejection ${String(e.reason).slice(0, 200)}`));
 
+  // Mode « demarrage » : phase A, l'onglet s'ouvre (l'appli de test enregistre son état) ; phase B, après
+  // la mise à jour du site, l'onglet est restauré comme Brave le fait au lancement. À chaque chargement :
+  // ce qui s'affiche au bout de 15 s au plus (l'appli, l'écran de démarrage, ou rien).
+  if (String(H.mode).startsWith('demarrage')) {
+    const phase = H.phase || 'A';
+    const nav = () => {
+      try {
+        return performance.getEntriesByType('navigation')[0].type;
+      } catch (e) {
+        return '?';
+      }
+    };
+    window.addEventListener(
+      'error',
+      (e) => {
+        const el = e.target;
+        if (el && el.tagName) post(`${phase} échec de chargement ${el.tagName} ${(el.src || el.href || '').split('/').pop()}`);
+      },
+      true,
+    );
+    post(`${phase} chargement ${location.href} · ouverture ${nav()}`);
+    let n = 0;
+    const tick = setInterval(() => {
+      n++;
+      const $ = (s) => document.querySelector(s);
+      const app = !!$('.app');
+      if (!app && n < 60) return;
+      clearInterval(tick);
+      let j = [];
+      try {
+        j = JSON.parse(localStorage.getItem('teatime:journal') || '[]').map((x) => x.e);
+      } catch (e) {}
+      const msg = $('#boot-msg') && !$('#boot-msg').hidden ? ` « ${$('#boot-msg').textContent} »` : '';
+      const code = ($('script[type=module][src]') || {}).src || '?';
+      const bg = getComputedStyle(document.body || document.documentElement).backgroundColor;
+      post(`${phase} ${app ? 'APPLI AFFICHÉE' : 'RIEN D’AFFICHÉ'} (${(n / 4).toFixed(2)} s) · ouverture ${nav()} · code ${code.split('/').pop()} · écran de démarrage ${$('#boot') ? 'oui' : 'non'}${msg} · fond ${bg}`);
+      j.slice(-4).forEach((e) => post(`${phase} journal : ${e}`));
+      // Phase A : laisser le cache s'écrire avant que l'appli de test enregistre l'onglet et soit tuée.
+      if (phase === 'A') setTimeout(() => post('PHASE-A'), 3000);
+      else post('EXIT');
+    }, 250);
+    return;
+  }
+
   // Espions : niveaux du micro (messages du worklet de capture) et texte rendu par Whisper.
   const levels = [];
   const spy = (proto) => {
